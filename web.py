@@ -205,6 +205,30 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor):
         except:
             return bool_res()[False]
     
+    @api("/auth/change_sign", methods=['POST'])
+    def change_sign(req):
+        """
+        TODO 还没测试
+        """
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        new_sign = req["new_sign"]
+        user_cursor.change_sign(uid, new_sign)
+    
+    @api("/auth/change_introduction", methods=["POST"])
+    def change_introduction(req):
+        """
+        TODO 还没测试
+        """
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        new_intro = req["new_introduction"]
+        user_cursor.change_introduction(uid, new_intro)
+    
     @api("/auth/change_captcha", methods=['POST'])
     def change_captcha(req):
         uid = req["uid"]

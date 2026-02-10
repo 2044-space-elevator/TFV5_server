@@ -96,3 +96,9 @@ class UserDb(Db):
     
     def change_email(self, oped : int, new_email : str):
         self.execute("UPDATE users SET email = ? where uid = ?", (new_email, oped))
+    
+    def change_sign(self, oped : int, new_sign : str):
+        self.execute("UPDATE users SET sign = ? where uid = ?", (new_sign, oped))
+
+    def change_introduction(self, oped : int, new_intro : str):
+        self.execute('UPDATE users SET introduction = ? where uid = ?', (new_intro, oped))

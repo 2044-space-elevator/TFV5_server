@@ -14,6 +14,33 @@
 
 返回：若身份核验成功，则返回值为时间戳加上 `True`。若身份核验失败，则返回值为时间戳加上 `False`。
 
+- `^ POST  /auth/change_sign` 改变个性签名
+
+请求体：
+
+```
+{
+    "new_sign" : <sign>
+}
+```
+
+其中 `<sign>` 是新的个性签名。
+
+返回：若密码更改成功，返回时间戳加 `True`，否则返回时间戳加 `False`。
+
+- `^ POST  /auth/change_introduction` 改变个人简介
+
+请求体：
+
+```
+{
+    "new_introduction" : <new_intro>
+}
+
+其中 `<new_intro>` 是新的个人简介
+
+返回：若密码更改成功，返回时间戳加 `True`，否则返回时间戳加 `False`。
+
 - `^ POST  /auth/change_pwd`  改变用户密码
 
 请求体：
