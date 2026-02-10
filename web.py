@@ -1,0 +1,246 @@
+from flask import Flask
+import register_tool
+import base64
+from db import *
+from crypto import generate_rsa_keys, return_app_route
+import time
+
+def bool_res() -> tuple: 
+    return (str(time.time()) + "False", str(time.time()) + "True")
+
+def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor):
+    """
+    pri 是 cryptography 库的私钥对象
+    pub_pem 是二进制 pem 文件路径
+    ImgCaptcha 是 captcha.ImageCaptcha 对象
+    ~_cursor 表示 db.tool.Db 对象
+    """
+    app = Flask(__name__)
+    api = return_app_route(app, pri)
+    @api("/", methods=["POST"]) 
+    def Hello_world(req):
+        print(req)
+        return "Hello World"
+    
+    @api("/auth/login", methods=["POST"])
+    def login(req):
+        try:
+            uid = req["uid"]
+            pwd = req["password"]
+            return bool_res()[user_cursor.verify_user(uid, pwd)]
+        except:
+            return bool_res()[False]
+    
+
+    @api("/auth/change_pwd", methods=["POST"])
+    def change_pwd(req):
+        try:
+            uid = req["uid"]
+            pwd = req["password"]
+            new_pwd = req["new_pwd"]
+            if not user_cursor.verify_user(uid, pwd):
+                return bool_res()[False]
+            user_cursor.change_pwd(uid, new_pwd)
+            return bool_res()[True]
+        except:
+            return bool_res()[False]
+
+    @app.route('/auth/captcha')
+    def get_captcha():
+        with open("res/{}/config.json".format(port_api), "r+") as file:
+            captcha = json.load(file)["captcha"]
+        if not captcha:
+            return {}
+        token = register_tool.generate_captcha(port_api, ImgCaptcha)
+        file_path = 'res/{}/captcha/{}.png'.format(port_api, token)
+        with open(file_path, "rb") as file:
+            ret_b64 = file.read()
+        ret_b64 = base64.b64encode(ret_b64).decode("utf-8")
+        return {"pic" : ret_b64, "stamp" : token}
+    
+    @api("/auth/change_email_verify", methods=['POST'])
+    def change_email_verify(req):
+        uid = req["uid"]
+        pwd = req["password"]
+
+        if not user_cursor.verify_user(uid, pwd):
+            return bool_res()[False]
+        if not user_cursor.uid_query(uid)[0][4] == 'root':
+            return bool_res()[False]
+        
+        new_stat = req["change_to"]
+        with open("res/{}/config.json".format(port_api), "r+") as file:
+            cfg = json.load(file)
+
+        if new_stat == False:
+            cfg["email_activate"] = ""
+            cfg["email_password"] = ""
+        else:
+            cfg["email_activate"] = req["verify_email"]
+            cfg["email_password"] = req["email_password"]
+
+        with open("res/{}/config.json".format(port_api), "w+") as file:
+            json.dump(cfg, file)
+        return bool_res()[True]
+        
+    @app.route("/auth/uid/<uid>")
+    def query_uid(uid):
+        info = user_cursor.uid_query(uid)
+        if not len(info):
+            return {}
+        ret = {
+            "uid" : info[0][0],
+            "username" : info[0][1],
+            "email" : info[0][2],
+            "stat" : info[0][4],
+            "create_time" : info[0][5],
+            "personal_sign" : info[0][6],
+            "introduction" : info[0][7]
+        } 
+        return ret
+
+    @app.route("/auth/username/<username>")
+    def query_username(username):
+        info = user_cursor.username_query(username)
+        if not len(info):
+            return {}
+        ret = {
+            "uid" : info[0][0],
+            "username" : info[0][1],
+            "email" : info[0][2],
+            "stat" : info[0][4],
+            "create_time" : info[0][5],
+            "personal_sign" : info[0][6],
+            "introduction" : info[0][7]
+        }
+        return ret
+
+    @api("/auth/change_email", methods=['POST'])
+    def change_email(req):
+        uid = req["uid"]
+        pwd = req["password"]
+        if not user_cursor.verify_user(uid, pwd):
+            return bool_res()[False]
+        new_email = req["new_email"]
+        user_cursor.change_email(uid, new_email)
+        return bool_res()[True]
+
+    @api("/auth/register", methods=['POST'])
+    def register(req):
+        username = req["username"]
+        password = req["password"]
+        is_captcha = False
+        with open("res/{}/config.json".format(port_api), "r+") as file:
+            cfg = json.load(file)
+            is_captcha = cfg['captcha']
+            is_email_activate = cfg["email_activate"]
+        
+        if is_captcha:
+            captcha_stamp = req["captcha_stamp"]
+            captcha_code = req["captcha_code"]
+            if not register_tool.verify_captcha(port_api, captcha_stamp, captcha_code):
+                return bool_res()[False]
+        
+        email = None
+        if "email" in req.keys():
+            email = req["email"] 
+        
+        if is_email_activate:
+            sender_email = cfg["email_activate"]
+            if not email:
+                return bool_res()[False]
+            email_pwd = cfg["email_password"]
+            if not register_tool.email_code(sender_email, port_api, email, email_pwd):
+                return bool_res()[False]
+
+        user_cursor.user_create(username, password, time.time(), email)
+        if is_email_activate:
+            user_cursor.change_auth(user_cursor.username_query(username)[0][0], "banned")
+        return bool_res()[True]
+
+    @api("/auth/activate", methods=["POST"])
+    def activate(req):
+        uid = req["uid"]
+        activate_code = req["activate_code"]
+        email = user_cursor.uid_query(uid)[0][2]
+        with open("res/{}/activate.json".format(port_api), "r+") as file:
+            if not email in json.load(file).keys():
+                return bool_res()[True]
+        if register_tool.verify_email(port_api, email, activate_code):
+            user_cursor.change_auth(uid, "user")
+            return bool_res()[True]
+        return bool_res()[False]
+     
+
+    @api("/auth/change_auth", methods=["POST"])
+    def change_auth(req):
+        try:
+            uid = req["uid"]
+            pwd = req["password"]
+            oped = req["change_uid"]
+            new_auth = req["new_auth"]
+            if not new_auth in ["user", "banned", "admin"]:
+                return bool_res()[False]
+
+            if not user_cursor.verify_user(uid, pwd):
+                return bool_res()[False]
+
+            op_auth = user_cursor.uid_query(uid)[0][4]
+            oped_auth = user_cursor.uid_query(oped)[0][4]
+            if op_auth == 'user' or op_auth == 'banned':
+                return bool_res()[False]
+            
+            if op_auth == "admin":
+                if oped_auth == "admin" or oped_auth == "root":
+                    return bool_res()[False]
+                if new_auth == "admin":
+                    return bool_res()[False]
+            
+            if op_auth == "root":
+                if oped_auth == "root":
+                    return bool_res()[False]
+            
+            user_cursor.change_auth(oped, new_auth)
+            return bool_res()[True]
+        except:
+            return bool_res()[False]
+    
+    @api("/auth/change_captcha", methods=['POST'])
+    def change_captcha(req):
+        uid = req["uid"]
+        pwd = req["password"]
+        final_stat = req["change_to"]
+        if not user_cursor.verify_user(uid, pwd):
+            return bool_res()[False]
+        if not user_cursor.uid_query(uid)[0][4] == 'root':
+            return bool_res()[False]
+        with open("res/{}/config.json".format(port_api), "r+") as file:
+            cfg = json.load(file)
+        cfg["captcha"] = final_stat
+        with open("res/{}/config.json".format(port_api), "w+") as file:
+            json.dump(cfg, file)
+        return bool_res()[True]
+
+    @app.route("/info")
+    def info():
+        with open("res/{}/config.json".format(port_api), "r+") as file:
+            cfg = json.load(file)
+        ret = {}
+        ret["server_name"] = cfg["server_name"]
+        ret["port_api"] = port_api
+        ret["port_tcp"] = port_tcp
+        ret["captcha"] = cfg["captcha"]
+        if cfg["email_activate"]:
+            ret["email_activate"] = True
+        else:
+            ret["email_activate"] = False
+        return ret
+
+    return app
+
+# pri, pub, pri_pem, pub_pem, has = generate_rsa_keys()
+# with open("res/7001/secret/pub.pem", "wb") as file:
+#     file.write(pub_pem)
+# usr_obj = UserDb("res/7001/db/user.db", 7001, 1145)
+# app = main(7001, 1145, pub_pem, pri, usr_obj)
+# app.run(debug=True)
