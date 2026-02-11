@@ -337,6 +337,43 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         except OperationalError as e:
             return {}
     
+    @api("/forum/remove_forum")
+    def remove_forum(req):
+        """
+        TODO TEST
+        """
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        creater = forum_cursor.query_forum_fid(fid)[0][2]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)
+        if not (user_stat in ["admin", "root"] or uid == creater):
+            return bool_res()[False]
+        forum_cursor.delete_forum(fid)
+        return bool_res()[False]
+    
+    @api("/forum/remove_post")
+    def remove_post(req):
+        """
+        TODO TEST
+        """
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        creater = forum_cursor.query_forum_fid(fid)[0][2]
+        pid = req["pid"]
+        creater_post = forum_cursor.query_post_pid(fid, pid)[0][2]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)
+        if not (user_stat in ["admin", "root"] or uid == creater or uid == creater_post):
+            return bool_res()[False]
+        forum_cursor.delete_post(fid, pid)
+        return bool_res()[True]
+
+
     return app
 
 # pri, pub, pri_pem, pub_pem, has = generate_rsa_keys()
