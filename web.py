@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, send_file
 import register_tool
 import base64
 from db import *
@@ -17,11 +17,11 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor):
     """
     app = Flask(__name__)
     api = return_app_route(app, pri)
-    @api("/", methods=["POST"]) 
-    def Hello_world(req):
-        print(req)
-        return "Hello World"
     
+    @app.route("/get_rsa_pub")
+    def get_rsa_key():
+        return send_file("res/{}/secret/pub.pem".format(port_api), download_name="{}.pem".format(port_api))
+
     @api("/auth/login", methods=["POST"])
     def login(req):
         try:
