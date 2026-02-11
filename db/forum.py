@@ -36,7 +36,7 @@ class ForumDb(Db):
     CREATE TABLE IF NOT EXISTS F{} (
         pid INTEGER UNIQUE NOT NULL,
         title TEXT,
-        creater TEXT NOT NULL,
+        creater INTEGER NOT NULL,
         content TEXT,
         send_time TEXT REAL
     )  

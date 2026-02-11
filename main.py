@@ -101,6 +101,9 @@ def create_new_server():
     if not os.path.exists("res/{}/db".format(PORT_API)):
         os.makedirs("res/{}/db".format(PORT_API))
 
+    if not os.path.exists("res/{}/forum".format(PORT_API)):
+        os.makedirs("res/{}/forum".format(PORT_API))
+
     cfg = {
         "server_name" : "TouchFish",
         "port_api" : PORT_API,
@@ -117,6 +120,12 @@ def create_new_server():
 
     with open("res/{}/activate.json".format(PORT_API), "w+") as file:
         file.write("{}") 
+
+    with open("res/{}/forum/queue.json".format(PORT_API), "w+") as file:
+        file.write('{"queue_num" : 0}')
+    
+    with open("res/{}/forum/comments.json".format(PORT_API), "w+") as file:
+        file.write("{}")
 
     USER_CURSOR = db.UserDb(HASHER, "res/{}/db/user.db".format(PORT_API), PORT_API, PORT_TCP)
     USER_CURSOR.create_user_table()
@@ -187,7 +196,8 @@ def main():
     pub_pem = open("res/{}/secret/pub.pem".format(PORT_API), "rb")
 
     USER_CURSOR = db.UserDb(HASHER, "res/{}/db/user.db".format(PORT_API), PORT_API, PORT_TCP)
-    FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR)
+    FORUM_CURSOR = db.ForumDb("res/{}/db/forum.db".format(PORT_API), PORT_API, PORT_TCP)
+    FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR)
     prt("注意：生产环境内不要显式启动 api 服务器！", "yellow")
     stat = input("是否直接显式启动 api 服务器？[Y]")
     if stat == 'Y' or stat == 'y':

@@ -2,13 +2,14 @@ from flask import Flask, send_file
 import register_tool
 import base64
 from db import *
+from sqlite3 import OperationalError
 from crypto import generate_rsa_keys, return_app_route
 import time
 
 def bool_res() -> tuple: 
     return (str(time.time()) + "False", str(time.time()) + "True")
 
-def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor):
+def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, forum_cursor):
     """
     pri 是 cryptography 库的私钥对象
     pub_pem 是二进制 pem 文件路径
@@ -256,6 +257,86 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor):
             ret["email_activate"] = False
         return ret
 
+    @api("/forum/create_forum", methods=["POST"])
+    def create_forum(req):
+        uid = req["uid"]
+        password = req["password"]
+        forum_name = req["forum_name"]
+        introduction = req["introduction"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
+            queue = json.load(file)
+        qid = queue['queue_num'] + 1
+        queue["queue_num"] = qid
+        queue[qid] = {
+            "creater" : uid,
+            "forumname" : forum_name,
+            "introduction" : introduction
+        } 
+        with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
+            json.dump(queue, file)
+        return bool_res()[True]
+        
+    @api("/forum/get_approving_forum_list", methods=['POST'])
+    def get_approving_forum_list(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if not user_stat in ["admin", "root"]:
+            return bool_res()[False]
+        return json.dumps(json.load(open("res/{}/forum/queue.json".format(port_api), "r+")), ensure_ascii=False)
+    
+    @api("/forum/approve_forum", methods=["POST"])
+    def approve_forum(req):
+        uid = req["uid"]
+        password = req["password"]
+        qid = req["qid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if not user_stat in ["admin", "root"]:
+            return bool_res()[False]
+        with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
+            queue = json.load(file)
+        fchosen = queue[str(qid)]
+        forum_cursor.create_forum(fchosen["forumname"], fchosen["creater"], fchosen["introduction"]) 
+        del queue[str(qid)]
+        queue["queue_num"] -= 1
+        with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
+            json.dump(queue, file)
+        return bool_res()[True]
+
+    @app.route("/forum/get_forum_list")
+    def get_forum_list():
+        return forum_cursor.query_all_forums()
+    
+    @api("/forum/send_post", methods=["POST"])
+    def send_post(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        if not isinstance(fid, int):
+            return {}
+        title = req["title"]
+        content = req["content"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        forum_cursor.send_post(fid, uid, title, content)
+        return bool_res()[True]
+
+
+    @app.route("/forum/get_post_list/<fid>")
+    def get_post_list(fid : str):
+        if not fid.isdigit():
+            return {}
+        try:
+            return forum_cursor.query_all_post(int(fid))
+        except OperationalError as e:
+            return {}
+    
     return app
 
 # pri, pub, pri_pem, pub_pem, has = generate_rsa_keys()
