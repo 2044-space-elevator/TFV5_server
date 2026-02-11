@@ -23,7 +23,7 @@ req["iv"] = iv
 req["content"] = req_body_cry
 
 print("这是发过去的请求体：", req)
-url = "http://127.0.0.1:5000/"
+url = "http://127.0.0.1:5000/auth/change_introduction"
 resp = requests.post(url, json=req)
 
 # 返回体转为 dict
