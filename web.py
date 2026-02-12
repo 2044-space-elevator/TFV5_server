@@ -261,6 +261,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     def create_forum(req):
         uid = req["uid"]
         password = req["password"]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
         forum_name = req["forum_name"]
         introduction = req["introduction"]
         if not user_cursor.verify_user(uid, password):
@@ -322,6 +325,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return {}
         title = req["title"]
         content = req["content"]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         forum_cursor.send_post(fid, uid, title, content)
@@ -382,6 +388,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         pid = req["pid"]
         comment = req["comment"]
         if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
             return bool_res()[False]
         with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
             comments = json.load(file)
