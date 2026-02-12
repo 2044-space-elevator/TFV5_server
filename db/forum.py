@@ -43,6 +43,11 @@ class ForumDb(Db):
     """
         self.execute("INSERT INTO forums (fid, forumname, creater, create_time, introduction) VALUES (?, ?, ?, ?, ?)", (fid, forumname, creater, time(), introduction))
         self.execute(cmd.format(fid))
+        with open("res/{}/forum/comments.json".format(self.api_pt), "r+") as file:
+            comments = json.load(file)
+        comments[fid] = {}
+        with open("res/{}/forum/comments.json".format(self.api_pt), "w+") as file:
+            json.dump(comments, file)
     
     def query_forum_fid(self, fid):
         return self.query("SELECT * FROM forums WHERE fid = ?", (fid,))
@@ -80,11 +85,26 @@ class ForumDb(Db):
         else:
             pid += 1
         self.execute("INSERT INTO F{} (pid, title, creater, content, send_time) VALUES (?, ?, ?, ?, ?)".format(fid), (pid, title, sender, content, time()))
+        with open("res/{}/forum/comments.json".format(self.api_pt), "r+") as file:
+            comments = json.load(file)
+        comments[str(fid)][str(pid)] = {}
+        with open("res/{}/forum/comments.json".format(self.api_pt), "w+") as file:
+            json.dump(comments, file)
         return True
     
     def delete_forum(self, fid : int):
         self.execute("DELETE FROM forums WHERE fid = ?", (fid, ))
         self.execute("DROP TABLE IF EXISTS F{}".format(fid))
+        with open("res/{}/forum/comments.json".format(self.api_pt), "r+") as file:
+            comments = json.load(file)
+        del comments[str(fid)]
+        with open("res/{}/forum/comments.json".format(self.api_pt), "w+") as file:
+            json.dump(comments, file)
 
     def delete_post(self, fid : int, pid : int):
         self.execute("DELETE FROM F{} where pid = ?".format(fid), (pid,))
+        with open("res/{}/forum/comments.json".format(self.api_pt), "r+") as file:
+            comments = json.load(file)
+        del comments[str(fid)][str(pid)]
+        with open("res/{}/forum/comments.json".format(self.api_pt), "w+") as file:
+            json.dump(comments, file)

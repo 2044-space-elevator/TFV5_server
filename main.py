@@ -141,7 +141,7 @@ def create_new_server():
     USER_CURSOR.change_auth(0, "root")
     
 def flask_thread():
-    FLASK_APP.run(debug=False, use_reloader=False)
+    FLASK_APP.run(host='0.0.0.0', port = PORT_API, debug=False, use_reloader=False)
 
 def main():
     global IMGCAPTCHA

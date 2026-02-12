@@ -337,11 +337,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         except OperationalError as e:
             return {}
     
-    @api("/forum/remove_forum")
+    @api("/forum/remove_forum", methods=["POST"])
     def remove_forum(req):
-        """
-        TODO TEST
-        """
         uid = req["uid"]
         password = req["password"]
         fid = req["fid"]
@@ -352,13 +349,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not (user_stat in ["admin", "root"] or uid == creater):
             return bool_res()[False]
         forum_cursor.delete_forum(fid)
-        return bool_res()[False]
+        return bool_res()[True]
     
-    @api("/forum/remove_post")
+    @api("/forum/remove_post", methods=['POST'])
     def remove_post(req):
-        """
-        TODO TEST
-        """
         uid = req["uid"]
         password = req["password"]
         fid = req["fid"]
@@ -371,6 +365,61 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not (user_stat in ["admin", "root"] or uid == creater or uid == creater_post):
             return bool_res()[False]
         forum_cursor.delete_post(fid, pid)
+        return bool_res()[True]
+
+    @api("/forum/comment", methods=["POST"])
+    def comment(req):
+        """
+        TODO
+
+        等到 TCP 模块写完，考虑写一个 @ 通知。
+        """
+        uid = req["uid"]
+        if not isinstance(uid, int):
+            return bool_res()[False]
+        password = req["password"]
+        fid = req["fid"]
+        pid = req["pid"]
+        comment = req["comment"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
+            comments = json.load(file)
+        comments[str(fid)][str(pid)][str(time.time())] = [uid, comment]
+        with open("res/{}/forum/comments.json".format(port_api), "w+") as file:
+            json.dump(comments, file)
+        return bool_res()[True]
+
+    @app.route("/forum/get_all_comments/<fid>/<pid>")
+    def get_all_comments(fid, pid):
+        if not fid.isdigit() or not pid.isdigit():
+            return {}
+        fid = int(fid)
+        pid = int(pid)
+        with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
+            comments = json.load(file)
+        return comments[str(fid)][str(pid)]
+    
+    @api("/forum/remove_comment", methods=['POST'])
+    def remove_comment(req):
+        uid = req["uid"]
+        if not isinstance(uid, int):
+            return bool_res()[False]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        fid = req["fid"]
+        pid = req["pid"]
+        time_stamp = req["send_time"]
+        with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
+            comments = json.load(file)
+        creater = comments[str(fid)][str(pid)][time_stamp][0]
+        user_stat = user_cursor.uid_query(uid)
+        if not (creater == uid or user_stat in ['admin', 'root']):
+            return bool_res()[False]
+        del comments[str(fid)][str(pid)][time_stamp]
+        with open("res/{}/forum/comments.json".format(port_api), "w+") as file:
+            json.dump(comments, file)
         return bool_res()[True]
 
 
