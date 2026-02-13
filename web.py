@@ -2,6 +2,7 @@ from flask import Flask, send_file
 import register_tool
 import base64
 from db import *
+import avatar
 from sqlite3 import OperationalError
 from crypto import generate_rsa_keys, return_app_route
 import time
@@ -272,6 +273,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             queue = json.load(file)
         qid = queue['queue_num'] + 1
         queue["queue_num"] = qid
+        for i in queue.keys():
+            if i.isdigit():
+                qid = max(qid, int(i) + 1)
         queue[qid] = {
             "creater" : uid,
             "forumname" : forum_name,
@@ -351,7 +355,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         creater = forum_cursor.query_forum_fid(fid)[0][2]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)
+        user_stat = user_cursor.uid_query(uid)[0][4]
         if not (user_stat in ["admin", "root"] or uid == creater):
             return bool_res()[False]
         forum_cursor.delete_forum(fid)
@@ -367,7 +371,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         creater_post = forum_cursor.query_post_pid(fid, pid)[0][2]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)
+        user_stat = user_cursor.uid_query(uid)[0][4]
         if not (user_stat in ["admin", "root"] or uid == creater or uid == creater_post):
             return bool_res()[False]
         forum_cursor.delete_post(fid, pid)
@@ -423,7 +427,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
             comments = json.load(file)
         creater = comments[str(fid)][str(pid)][time_stamp][0]
-        user_stat = user_cursor.uid_query(uid)
+        user_stat = user_cursor.uid_query(uid)[0][4]
         if not (creater == uid or user_stat in ['admin', 'root']):
             return bool_res()[False]
         del comments[str(fid)][str(pid)][time_stamp]
@@ -431,7 +435,66 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             json.dump(comments, file)
         return bool_res()[True]
 
+    @app.route("/avatar/get_avatar/<typ>/<tid>")
+    def get_avatar(typ, tid):
+        if not tid.isdigit():
+            return 
+        if not typ in ["forum", "user", "group"]:
+            return 
+        return send_file(avatar.get_avatar(port_api, tid, typ))
+    
+    @app.route("/avatar/get_logo")
+    def get_logo():
+        return send_file("res/{}/avatar/logo.png".format(port_api))
+    
+    @api("/avatar/upload_forum_avatar", methods=['POST'])
+    def upload_forum_avatar(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        fid = req["fid"]
+        pic_b64 = req["pic"]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        creater = forum_cursor.query_forum_fid(fid)[0][2]
+        if uid == creater or user_stat in ['admin', 'root']:
+            avatar.upload_avatar(port_api, fid, pic_b64, 'forum')
+            return bool_res()[True]
+        return bool_res()[False]
+        
+    @api("/avatar/upload_user_avatar", methods=['POST'])
+    def upload_user_avatar(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        pic_b64 = req["pic"]
+        avatar.upload_avatar(port_api, uid, pic_b64, 'user')
+        return bool_res()[True]
+    
+    @api('/avatar/upload_group_avatar', methods=['POST'])
+    def upload_group_avatar(req):
+        """
+        TODO
 
+        上传群聊 logo
+        """
+    
+    @api('/avatar/upload_logo', methods=['POST'])
+    def upload_logo(req):
+        uid = req["uid"]
+        password = req["password"]
+        pic_b64 = req["pic"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if not user_stat in ['admin', 'root']:
+            return bool_res()[False]
+        with open("res/{}/avatar/logo.png".format(port_api), 'wb') as file:
+            file.write(base64.b64decode(pic_b64))
+        return bool_res()[True]
+        
+ 
     return app
 
 # pri, pub, pri_pem, pub_pem, has = generate_rsa_keys()

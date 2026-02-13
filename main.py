@@ -4,6 +4,7 @@ from captcha.image import ImageCaptcha
 import threading
 import web
 import db
+import avatar
 import logging
 from crypto import generate_rsa_keys, load_pub, load_pri
 import time
@@ -127,6 +128,7 @@ def create_new_server():
     with open("res/{}/forum/comments.json".format(PORT_API), "w+") as file:
         file.write("{}")
 
+    avatar.init(PORT_API)
     USER_CURSOR = db.UserDb(HASHER, "res/{}/db/user.db".format(PORT_API), PORT_API, PORT_TCP)
     USER_CURSOR.create_user_table()
     print("[INFO] user.db 创建完毕！")

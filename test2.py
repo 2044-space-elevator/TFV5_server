@@ -23,7 +23,7 @@ req["iv"] = iv
 req["content"] = req_body_cry
 
 print("这是发过去的请求体：", req)
-url = "http://127.0.0.1:7001/forum/remove_comment"
+url = "http://127.0.0.1:7001/avatar/upload_forum_avatar"
 resp = requests.post(url, json=req)
 print(resp)
 
