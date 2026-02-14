@@ -13,7 +13,8 @@ class ForumDb(Db):
         forumname TEXT NOT NULL,
         creater INTEGER,
         create_time TEXT REAL,
-        introduction TEXT
+        introduction TEXT,
+        post_num INTEGER
     )
     """
         self.execute(cmd)
@@ -41,7 +42,7 @@ class ForumDb(Db):
         send_time TEXT REAL
     )  
     """
-        self.execute("INSERT INTO forums (fid, forumname, creater, create_time, introduction) VALUES (?, ?, ?, ?, ?)", (fid, forumname, creater, time(), introduction))
+        self.execute("INSERT INTO forums (fid, forumname, creater, create_time, introduction, post_num) VALUES (?, ?, ?, ?, ?, 0)", (fid, forumname, creater, time(), introduction))
         self.execute(cmd.format(fid))
         with open("res/{}/forum/comments.json".format(self.api_pt), "r+") as file:
             comments = json.load(file)
@@ -74,7 +75,7 @@ class ForumDb(Db):
         return self.query("SELECT * FROM F{}".format(fid))
     
     def query_all_forums(self):
-        return self.query("SELECT * FROM forums")
+        return self.query("SELECT * FROM forums ORDER BY post_num DESC")
 
     def send_post(self, fid : int, sender : int, title : str, content : str):
         if len(title) > 30:
@@ -85,6 +86,7 @@ class ForumDb(Db):
         else:
             pid += 1
         self.execute("INSERT INTO F{} (pid, title, creater, content, send_time) VALUES (?, ?, ?, ?, ?)".format(fid), (pid, title, sender, content, time()))
+        self.execute("UPDATE forums set post_num = post_num + 1 where fid = ?", (fid,))
         with open("res/{}/forum/comments.json".format(self.api_pt), "r+") as file:
             comments = json.load(file)
         comments[str(fid)][str(pid)] = {}

@@ -74,6 +74,8 @@
 ]
 ```
 
+**依照的是论坛帖子数量降序排序**。
+
 - `^ POST /forum/send_post` 发布帖子
 
 请求体：
@@ -127,3 +129,36 @@
     "fid" : <fid>,
 }
 ```
+
+- `^ POST /forum/comment`
+
+评论。
+
+请求体：
+
+```
+{
+    "fid" : <fid>,
+    "pid" : <pid>,
+    "comment" : <comment>
+}
+```
+
+其中 `<fid>` 是论坛编号，`<pid>` 是论坛中的帖子编号。
+
+- `* GET /forum/get_all_comments/<fid>/<pid>` 返回一个帖子的所有评论。
+
+- `^ POST /forum/remove_comment` 删除评论。
+
+请求体：
+
+```
+{
+    "fid" : <fid>,
+    "pid" : <pid>,
+    "send_time" : <send_time>
+}
+```
+
+其中 `<send_time>` 是评论的时间戳。
+

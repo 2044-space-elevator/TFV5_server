@@ -5,6 +5,7 @@ import threading
 import web
 import db
 import avatar
+import file
 import logging
 from crypto import generate_rsa_keys, load_pub, load_pri
 import time
@@ -111,7 +112,8 @@ def create_new_server():
         "port_tcp" : PORT_TCP,
         "email_activate" : "",
         "captcha" : False,
-        "email_password" : ""
+        "email_password" : "",
+        "file_last_time" : 72
     }
     with open("res/{}/config.json".format(PORT_API), "w+") as file:
         json.dump(cfg, file) 
@@ -135,6 +137,8 @@ def create_new_server():
     FORUM_CURSOR = db.ForumDb('res/{}/db/forum.db'.format(PORT_API), PORT_API, PORT_TCP)
     FORUM_CURSOR.create_forum_table()
     print("[INFO] forum.db 创建完毕！")
+    file.init()
+    print("[INFO] file.db 创建完毕！")
     
 
     root_username = input("输入 root 用户的用户名：")
