@@ -393,6 +393,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         fid = req["fid"]
         pid = req["pid"]
         comment = req["comment"]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         user_stat = user_cursor.uid_query(uid)[0][4]
@@ -502,6 +505,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         password = req["password"]
         filename = req["filename"]
         file_b64 = req["file_b64"]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         file.upload_file(port_api, uid, file_b64, filename, file_cursor)
