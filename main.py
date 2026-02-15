@@ -203,7 +203,8 @@ def main():
 
     USER_CURSOR = db.UserDb(HASHER, "res/{}/db/user.db".format(PORT_API), PORT_API, PORT_TCP)
     FORUM_CURSOR = db.ForumDb("res/{}/db/forum.db".format(PORT_API), PORT_API, PORT_TCP)
-    FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR)
+    FILE_CURSOR = db.FileDb("res/{}/file/file.db".format(PORT_API), PORT_API)
+    FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR, FILE_CURSOR)
     prt("注意：生产环境内不要显式启动 api 服务器！", "yellow")
     stat = input("是否直接显式启动 api 服务器？[Y]")
     if stat == 'Y' or stat == 'y':

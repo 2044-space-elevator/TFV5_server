@@ -3,6 +3,7 @@ import register_tool
 import base64
 from db import *
 import avatar
+import file
 from sqlite3 import OperationalError
 from crypto import generate_rsa_keys, return_app_route
 import time
@@ -10,7 +11,7 @@ import time
 def bool_res() -> tuple: 
     return (str(time.time()) + "False", str(time.time()) + "True")
 
-def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, forum_cursor):
+def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, forum_cursor, file_cursor):
     """
     pri 是 cryptography 库的私钥对象
     pub_pem 是二进制 pem 文件路径
@@ -494,6 +495,36 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             file.write(base64.b64decode(pic_b64))
         return bool_res()[True]
         
+    @api('/file/upload_file', methods=['POST'])
+    def upload_file(req):
+        uid = req["uid"]
+        password = req["password"]
+        filename = req["filename"]
+        file_b64 = req["file_b64"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        file.upload_file(port_api, uid, file_b64, filename, file_cursor)
+        return bool_res()[True]
+
+    @app.route('/file/get_file_info/<hashes>')
+    def get_file_info(hashes):
+        qry = file_cursor.return_file(hashes)
+        if not qry:
+            return {}
+        qry = qry[0]
+        return {
+            "sender" : qry[0],
+            "file_name" : qry[1],
+            "send_time" : qry[3],
+            "active" : qry[4]
+        }
+    
+    @app.route("/file/get_file/<hashes>")
+    def get_file(hashes : str):
+        qry = file_cursor.return_file(hashes)
+        if (not qry) or qry[0][4] == False:
+            return 
+        return send_file("res/{}/file/{}.file".format(port_api, hashes), download_name=qry[0][1], as_attachment=True)
  
     return app
 
