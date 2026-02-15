@@ -23,7 +23,7 @@ req["iv"] = iv
 req["content"] = req_body_cry
 
 print("这是发过去的请求体：", req)
-url = "http://127.0.0.1:7001/file/upload_file"
+url = "http://127.0.0.1:7001/announcement/delete_announcement"
 resp = requests.post(url, json=req)
 print(resp)
 

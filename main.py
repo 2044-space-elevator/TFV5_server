@@ -5,7 +5,7 @@ import threading
 import web
 import db
 import avatar
-import file
+from file import init
 import logging
 from crypto import generate_rsa_keys, load_pub, load_pri
 import time
@@ -129,6 +129,9 @@ def create_new_server():
     
     with open("res/{}/forum/comments.json".format(PORT_API), "w+") as file:
         file.write("{}")
+    
+    with open("res/{}/announcement.json".format(PORT_API), "w+") as file:
+        file.write("{}")
 
     avatar.init(PORT_API)
     USER_CURSOR = db.UserDb(HASHER, "res/{}/db/user.db".format(PORT_API), PORT_API, PORT_TCP)
@@ -137,7 +140,7 @@ def create_new_server():
     FORUM_CURSOR = db.ForumDb('res/{}/db/forum.db'.format(PORT_API), PORT_API, PORT_TCP)
     FORUM_CURSOR.create_forum_table()
     print("[INFO] forum.db 创建完毕！")
-    file.init()
+    init(PORT_API)
     print("[INFO] file.db 创建完毕！")
     
 

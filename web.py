@@ -5,6 +5,7 @@ from db import *
 import avatar
 import file
 from sqlite3 import OperationalError
+import announcements
 from crypto import generate_rsa_keys, return_app_route
 import time
 
@@ -525,6 +526,62 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if (not qry) or qry[0][4] == False:
             return 
         return send_file("res/{}/file/{}.file".format(port_api, hashes), download_name=qry[0][1], as_attachment=True)
+    
+    @api("/announcement/upload_announcement", methods=['POST'])
+    def upload_announcement(req):
+        """
+        TODO
+
+        发送公告提醒
+        """
+        uid = req["uid"]
+        password = req["password"]
+        content = req["content"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if not user_stat in ['admin', 'root']:
+            return bool_res()[False]
+        announcements.upload_announcement(port_api, uid, content)
+        return bool_res()[True]
+    
+    @api("/announcement/edit_announcement", methods=['POST'])
+    def edit_announcement(req):
+        """
+        TODO
+
+        发送公告提醒
+        """
+        uid = req["uid"]
+        password = req["password"]
+        time_stamp = req["time_stamp"]
+        content = req["content"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if not user_stat in ['admin', 'root']:
+            return bool_res()[False]
+        return bool_res()[announcements.edit_announcement(port_api, time_stamp, content)] 
+    
+    @api("/announcement/delete_announcement", methods=['POST'])
+    def delete_announcement(req):
+        uid = req["uid"]
+        password = req["password"]
+        time_stamp = req["time_stamp"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if not user_stat in ['admin', 'root']:
+            return bool_res()[False]
+        return bool_res()[announcements.delete_announcement(port_api, time_stamp)]
+    
+    @app.route("/announcement/query_all")
+    def query_all():
+        return announcements.query_all(port_api)
+    
+    @app.route("/announcement/query_single/<time_stamp>")
+    def query_single(time_stamp : str):
+        return announcements.query_single(port_api, time_stamp)
  
     return app
 
