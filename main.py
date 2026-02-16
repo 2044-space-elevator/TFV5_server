@@ -142,12 +142,14 @@ def create_new_server():
     print("[INFO] forum.db 创建完毕！")
     init(PORT_API)
     print("[INFO] file.db 创建完毕！")
+    NOTIFICATION_CURSOR = db.NotificationsDb("res/{}/db/notification.db".format(PORT_API), PORT_API)
     
 
     root_username = input("输入 root 用户的用户名：")
     root_password = input("输入 root 用户的密码：")
     USER_CURSOR.user_create(root_username, root_password, time.time())
     USER_CURSOR.change_auth(0, "root")
+    NOTIFICATION_CURSOR.create_user_table(0)
     
 def flask_thread():
     FLASK_APP.run(host='0.0.0.0', port = PORT_API, debug=False, use_reloader=False)
@@ -207,7 +209,8 @@ def main():
     USER_CURSOR = db.UserDb(HASHER, "res/{}/db/user.db".format(PORT_API), PORT_API, PORT_TCP)
     FORUM_CURSOR = db.ForumDb("res/{}/db/forum.db".format(PORT_API), PORT_API, PORT_TCP)
     FILE_CURSOR = db.FileDb("res/{}/file/file.db".format(PORT_API), PORT_API)
-    FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR, FILE_CURSOR)
+    NOTIFICATION_CURSOR = db.NotificationsDb("res/{}/db/notification.db".format(PORT_API), PORT_API)
+    FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR, FILE_CURSOR, NOTIFICATION_CURSOR)
     prt("注意：生产环境内不要显式启动 api 服务器！", "yellow")
     stat = input("是否直接显式启动 api 服务器？[Y]")
     if stat == 'Y' or stat == 'y':

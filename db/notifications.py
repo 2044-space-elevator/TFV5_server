@@ -1,11 +1,11 @@
-from tool import Db 
+from db.tool import Db 
 import time
 
 class NotificationsDb(Db):
     def __init__(self, path : str, port_api : int):
         super().__init__(path, port_api, -1)
     
-    def create_usre_table(self, uid : int):
+    def create_user_table(self, uid : int):
         cmd = """
     CREATE TABLE IF NOT EXISTS U{} (
         time_stamp REAL,

@@ -12,7 +12,7 @@ import time
 def bool_res() -> tuple: 
     return (str(time.time()) + "False", str(time.time()) + "True")
 
-def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, forum_cursor, file_cursor):
+def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, forum_cursor, file_cursor, notification_cursor):
     """
     pri 是 cryptography 库的私钥对象
     pub_pem 是二进制 pem 文件路径
@@ -160,6 +160,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_cursor.user_create(username, password, time.time(), email)
         if is_email_activate:
             user_cursor.change_auth(user_cursor.username_query(username)[0][0], "banned")
+        notification_cursor.create_user_table(user_cursor.username_query(username)[0][0])
         return bool_res()[True]
 
     @api("/auth/activate", methods=["POST"])
