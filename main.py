@@ -113,7 +113,9 @@ def create_new_server():
         "email_activate" : "",
         "captcha" : False,
         "email_password" : "",
-        "file_last_time" : 72
+        "file_last_time" : 72,
+        "groups_limit" : 30,
+        "single_group_max_people" : 200
     }
     with open("res/{}/config.json".format(PORT_API), "w+") as file:
         json.dump(cfg, file) 
@@ -143,6 +145,10 @@ def create_new_server():
     init(PORT_API)
     print("[INFO] file.db 创建完毕！")
     NOTIFICATION_CURSOR = db.NotificationsDb("res/{}/db/notification.db".format(PORT_API), PORT_API)
+    print("[INFO] notification.db 创建完毕")
+    GROUP_CURSOR = db.GroupDb("res/{}/db/group.db".format(PORT_API), PORT_API)
+    GROUP_CURSOR.create_group_table()
+    print("[INFO] group.db 创建完毕")
     
 
     root_username = input("输入 root 用户的用户名：")
@@ -210,7 +216,8 @@ def main():
     FORUM_CURSOR = db.ForumDb("res/{}/db/forum.db".format(PORT_API), PORT_API, PORT_TCP)
     FILE_CURSOR = db.FileDb("res/{}/file/file.db".format(PORT_API), PORT_API)
     NOTIFICATION_CURSOR = db.NotificationsDb("res/{}/db/notification.db".format(PORT_API), PORT_API)
-    FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR, FILE_CURSOR, NOTIFICATION_CURSOR)
+    GROUP_CURSOR = db.GroupDb("res/{}/db/group.db".format(PORT_API), PORT_API)
+    FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR, FILE_CURSOR, NOTIFICATION_CURSOR, GROUP_CURSOR)
     prt("注意：生产环境内不要显式启动 api 服务器！", "yellow")
     stat = input("是否直接显式启动 api 服务器？[Y]")
     if stat == 'Y' or stat == 'y':

@@ -102,3 +102,12 @@ class UserDb(Db):
 
     def change_introduction(self, oped : int, new_intro : str):
         self.execute('UPDATE users SET introduction = ? where uid = ?', (new_intro, oped))
+    
+    def create_dialogue_table(self, ua_id : int, ub_id : int) :
+        cmd = """
+    CREATE TABLE IF NOT EXISTS U{}U{} (
+        time_stamp REAL,
+        content TEXT
+    )
+    """.format(ua_id, ub_id)
+        self.execute(cmd)

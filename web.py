@@ -12,7 +12,7 @@ import time
 def bool_res() -> tuple: 
     return (str(time.time()) + "False", str(time.time()) + "True")
 
-def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, forum_cursor, file_cursor, notification_cursor):
+def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, forum_cursor, file_cursor, notification_cursor, group_cursor):
     """
     pri 是 cryptography 库的私钥对象
     pub_pem 是二进制 pem 文件路径
@@ -255,6 +255,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         ret["port_api"] = port_api
         ret["port_tcp"] = port_tcp
         ret["captcha"] = cfg["captcha"]
+        ret["file_last_time"] = cfg["file_last_time"]
+        ret["groups_limit"] = cfg["groups_limit"]
+        ret["single_group_max_people"] = cfg["single_group_max_people"]
         if cfg["email_activate"]:
             ret["email_activate"] = True
         else:
@@ -590,6 +593,21 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     def query_single(time_stamp : str):
         return announcements.query_single(port_api, time_stamp)
  
+
+    @api("/group/create_group", methods=['POST'])
+    def create_group(req):
+        uid = req["uid"]
+        password = req["password"]
+        groupname = req["groupname"]
+        introduction = req["introduction"]
+        if not "enter_hint" in req:
+            enter_hint = ""
+        else:
+            enter_hint = req["enter_hint"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        return bool_res()[group_cursor.create_group(uid, groupname, enter_hint, introduction)]
+
     return app
 
 # pri, pub, pri_pem, pub_pem, has = generate_rsa_keys()

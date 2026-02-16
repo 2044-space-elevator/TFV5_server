@@ -14,7 +14,8 @@ class InstantConnect():
         self.port_tcp = port_tcp
         self.connected_clients = dict()
         self.connected_clients[-1] = []
-        self.send_queue = queue.Queue()
+        self.clients_belonged = dict()
+        self.send_queue = dict()
         self.user_cursor = user_cursor
         self.aes_key = None
         self.pri_key = crypto.load_pri("res/{}/secret/pri.pem".format(port_api))
@@ -24,10 +25,28 @@ class InstantConnect():
         iv, content = crypto.aes_encrypt(json_req, self.aes_key)
         iv = base64.b64encode(iv).decode('utf-8')
         content = base64.b64encode(content).decode('utf-8')
-        return json.dumps({"iv" : iv, "content" : content})
+        return json.dumps({"iv" : iv, "content" : content}) 
+    
+    def send_to_client(self, websocket, message : dict):
+        self.send_queue[websocket].put(message)
+        notification_cursor.add_event(self.clients_belonged[websocket], message)
+    
+    async def sender(self, websocket, queue):
+        try:
+            while True:
+                if queue.empty():
+                    continue
+                message = await queue.get()
+                try:
+                    await websocket.send(self.encrypt_response(message))
+                except websockets.exceptions.ConnectionClosed:
+                    break
+        except asyncio.CancelledError:
+            pass
     
     async def handler(self, websocket : websockets.ClientConnection):
         self.connected_clients[-1].append(websocket)
+        self.clients_belonged[websocket] = -1
         try:
             message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
             message = json.loads(message)
@@ -38,6 +57,7 @@ class InstantConnect():
 
         except Exception as e:
             self.connected_clients[-1].remove(websocket)
+            del self.clients_belonged[websocket]
             print("[ERR] 客户端链接 WS 服务器后没有发出 AES 密钥声明")
             return
         
@@ -53,13 +73,27 @@ class InstantConnect():
             if not message["uid"] in self.connected_clients.keys():
                 self.connected_clients[message['uid']] = []
             self.connected_clients[message['uid']].append(websocket)
+            self.clients_belonged[websocket] = message['uid']
             await websocket.send(self.encrypt_response({"type" : "AUTH.LOGIN_SUCCEEDED"}))
-            print(self.connected_clients)
+            self.send_queue[websocket] = queue.Queue()
 
         except Exception as e:
             print("[ERR] 客户端链接 WS 服务器后没有登录")
+            del self.clients_belonged[websocket]
             self.connected_clients[-1].remove(websocket)
             return
+        
+        send_task = asyncio.create_task(self.sender(websocket, self.send_queue[websocket]))
+
+        try:
+            async for message in websocket:
+                print("Receive message", message)
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        finally:
+            send_task.cancel()
+            del self.send_queue[websocket]
+            
 
     async def main(self):
         async with websockets.serve(self.handler, "0.0.0.0", self.port_tcp):
@@ -74,5 +108,6 @@ if __name__ == '__main__':
         salt_len=16
     )
     user_cursor = db.UserDb(hasher, 'res/7001/db/user.db', 7001, 1145)
+    notification_cursor = db.NotificationsDb('res/7001/db/notification.db', 7001)
     example = InstantConnect(7001, 1145, -1, user_cursor)
     asyncio.run(example.main())
