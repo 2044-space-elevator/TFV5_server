@@ -36,6 +36,7 @@
 {
     "new_introduction" : <new_intro>
 }
+```
 
 其中 `<new_intro>` 是新的个人简介
 
