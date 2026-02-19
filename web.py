@@ -607,7 +607,54 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         return bool_res()[group_cursor.create_group(uid, groupname, enter_hint, introduction)]
+    
+    @api("/group/remove_member", methods=['POST'])
+    def invite_member(req):
+        """
+        TODO TEST
+        """
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        removed = req["removed"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        oper = group_cursor.is_admin(gid, uid)
+        oped = group_cursor.is_admin(gid, removed)
+        if not oper > oped:
+            return bool_res()[False]
+        return bool_res()[group_cursor.remove_member(uid, removed)]
+    
+    @api("/group/remove_admin", methods=['POST'])
+    def remove_admin(req):
+        """
+        TODO TEST
+        """
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        removed = req["removed"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        if not group_cursor.is_admin(gid, uid) == 2:
+            return bool_res()[False]
+        return bool_res()[group_cursor.remove_admin(gid, removed)]
 
+    @api("/group/delete_group", methods=['POST'])
+    def delete_group(req):
+        """
+        TODO TEST
+        """
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        if not group_cursor.is_admin(gid, uid) == 2:
+            return bool_res()[False]
+        group_cursor.delete_group(gid)
+        return bool_res()[True]
+    
     return app
 
 # pri, pub, pri_pem, pub_pem, has = generate_rsa_keys()
