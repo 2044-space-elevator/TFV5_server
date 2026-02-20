@@ -600,6 +600,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         password = req["password"]
         groupname = req["groupname"]
         introduction = req["introduction"]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
         if not "enter_hint" in req:
             enter_hint = ""
         else:
@@ -608,10 +611,48 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         return bool_res()[group_cursor.create_group(uid, groupname, enter_hint, introduction)]
     
-    @api("/group/remove_member", methods=['POST'])
+    @app.route("/group/group_info/<gid>")
+    def group_info(gid : str): 
+        if not gid.isdigit():
+            return {}
+        qry = group_cursor.query_gid(gid)
+        if len(qry) < 1:
+            return {}
+        return list(qry[0])
+        
+    @app.route("/group/groupname_search/<groupname>")
+    def groupname_search(groupname : str):
+        return group_cursor.groupname_search(groupname)        
+
+    @api("/group/add_admin", methods=['POST'])
+    def add_admin(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        gid = req["gid"]
+        added = req["added"]
+        stat = group_cursor.is_admin(gid, uid)
+        if stat != 2:
+            return bool_res()[False]
+        return bool_res()[group_cursor.add_admin(gid, added)]
+    
+    @api("/group/invite_member", methods=['POST'])
     def invite_member(req):
+        uid = req['uid']
+        password = req['password']
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        gid = req['gid']
+        added = req['added']
+        if not user_cursor.uid_query(added):
+            return bool_res()[False]
+        return bool_res()[group_cursor.add_member(gid, added)]
+
+    @api("/group/remove_member", methods=['POST'])
+    def remove_member(req):
         """
-        TODO TEST
+        TODO 踢出提醒
         """
         uid = req["uid"]
         password = req["password"]
@@ -628,7 +669,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     @api("/group/remove_admin", methods=['POST'])
     def remove_admin(req):
         """
-        TODO TEST
+        TODO 移除权限提醒 
         """
         uid = req["uid"]
         password = req["password"]

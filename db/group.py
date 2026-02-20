@@ -19,6 +19,9 @@ class GroupDb(Db):
     """
         self.execute(cmd)
     
+    def groupname_search(self, groupname : str):
+        return self.query("SELECT * FROM groups WHERE groupname LIKE ?", ('%' + groupname + '%',))
+    
     def is_admin(self, gid : int, uid : int):
         members = self.query_gid(gid)
         creater, admins = members[0][1], members[0][4]

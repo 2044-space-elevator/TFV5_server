@@ -23,7 +23,7 @@ req["iv"] = iv
 req["content"] = req_body_cry
 
 print("这是发过去的请求体：", req)
-url = "http://127.0.0.1:7001/group/create_group"
+url = "http://127.0.0.1:7001/group/delete_group"
 resp = requests.post(url, json=req)
 print(resp)
 

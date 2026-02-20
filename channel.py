@@ -2,7 +2,6 @@ import websockets
 from argon2 import PasswordHasher
 import db
 import json
-import queue
 import crypto
 import time
 import asyncio
@@ -17,12 +16,12 @@ class InstantConnect():
         self.clients_belonged = dict()
         self.send_queue = dict()
         self.user_cursor = user_cursor
-        self.aes_key = None
+        self.aes_key = dict() 
         self.pri_key = crypto.load_pri("res/{}/secret/pri.pem".format(port_api))
     
-    def encrypt_response(self, req : dict):
+    def encrypt_response(self, req : dict, websocket):
         json_req = json.dumps(req)
-        iv, content = crypto.aes_encrypt(json_req, self.aes_key)
+        iv, content = crypto.aes_encrypt(json_req, self.aes_key[websocket])
         iv = base64.b64encode(iv).decode('utf-8')
         content = base64.b64encode(content).decode('utf-8')
         return json.dumps({"iv" : iv, "content" : content}) 
@@ -34,13 +33,8 @@ class InstantConnect():
     async def sender(self, websocket, queue):
         try:
             while True:
-                if queue.empty():
-                    continue
                 message = await queue.get()
-                try:
-                    await websocket.send(self.encrypt_response(message))
-                except websockets.exceptions.ConnectionClosed:
-                    break
+                await websocket.send(self.encrypt_response(message))
         except asyncio.CancelledError:
             pass
     
@@ -53,7 +47,7 @@ class InstantConnect():
             if message['type'] != 'REQ.UPDATE_AES_KEY':
                 raise
             message["aes_key"] = base64.b64decode(message["aes_key"])
-            self.aes_key = crypto.decrypt(self.pri_key, message["aes_key"]) 
+            self.aes_key[websocket] = crypto.decrypt(self.pri_key, message["aes_key"]) 
 
         except Exception as e:
             self.connected_clients[-1].remove(websocket)
@@ -64,7 +58,7 @@ class InstantConnect():
         try:
             message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
             message = json.loads(message)
-            message = json.loads(crypto.aes_decrypt(base64.b64decode(message['iv']), base64.b64decode(message['content']), self.aes_key))
+            message = json.loads(crypto.aes_decrypt(base64.b64decode(message['iv']), base64.b64decode(message['content']), self.aes_key[websocket]))
             if message['type'] != 'AUTH.LOGIN':
                 raise
             if not self.user_cursor.verify_user(message['uid'], message['password']):
@@ -74,8 +68,8 @@ class InstantConnect():
                 self.connected_clients[message['uid']] = []
             self.connected_clients[message['uid']].append(websocket)
             self.clients_belonged[websocket] = message['uid']
-            await websocket.send(self.encrypt_response({"type" : "AUTH.LOGIN_SUCCEEDED"}))
-            self.send_queue[websocket] = queue.Queue()
+            await websocket.send(self.encrypt_response({"type" : "AUTH.LOGIN_SUCCEEDED"}, websocket))
+            self.send_queue[websocket] = asyncio.Queue()
 
         except Exception as e:
             print("[ERR] 客户端链接 WS 服务器后没有登录")
@@ -109,5 +103,5 @@ if __name__ == '__main__':
     )
     user_cursor = db.UserDb(hasher, 'res/7001/db/user.db', 7001, 1145)
     notification_cursor = db.NotificationsDb('res/7001/db/notification.db', 7001)
-    example = InstantConnect(7001, 1145, -1, user_cursor)
+    example = InstantConnect(7001, 1145, notification_cursor, user_cursor)
     asyncio.run(example.main())
