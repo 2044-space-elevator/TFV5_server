@@ -517,6 +517,60 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         file.upload_file(port_api, uid, file_b64, filename, file_cursor)
         return bool_res()[True]
 
+
+    #实验性新特性：流式分块上传接口，支持超大文件上传。客户端将文件分割成多个块，每次上传一个块，并在最后一个块上传完成后进行文件合并和完整性校验。
+    @api('/file/chunked_upload', methods=['POST'])
+    def chunked_upload(req):
+        """
+        流式分块上传接口（支持超大文件）
+        
+        请求参数：
+        - uid: 用户 ID
+        - password: 用户密码
+        - filename: 文件名
+        - chunk_index: 当前块索引（从 0 开始）
+        - chunk_total: 总块数
+        - chunk_data: Base64 编码的块数据
+        - file_id: 文件 ID（仅第一块之后需要）
+        - expected_hash: 客户端计算的文件SHA256哈希值（可选，用于完整性校验）
+        """
+        try:
+            uid = req["uid"]
+            password = req["password"]
+            filename = req["filename"]
+            chunk_index = req.get("chunk_index", 0)
+            chunk_total = req.get("chunk_total", 1)
+            chunk_data = req["chunk_data"]
+            file_id = req.get("file_id", None)
+            expected_hash = req.get("expected_hash", None)
+            
+            # 验证用户
+            user_stat = user_cursor.uid_query(uid)[0][4]
+            if user_stat == 'banned':
+                return {"success": False, "error": "User banned"}
+            
+            if not user_cursor.verify_user(uid, password):
+                return {"success": False, "error": "Password incorrect"}
+            
+            # 调用流式上传函数
+            result = file.chunked_upload_file(
+                port_api, 
+                uid, 
+                filename, 
+                chunk_index, 
+                chunk_total, 
+                chunk_data, 
+                file_id, 
+                file_cursor,
+                expected_hash
+            )
+            return result
+        except KeyError as e:
+            return {"success": False, "error": "Missing parameter: " + str(e)}
+        except Exception as e:
+            return {"success": False, "error": "Server error: " + str(e)}
+
+
     @app.route('/file/get_file_info/<hashes>')
     def get_file_info(hashes):
         qry = file_cursor.return_file(hashes)
