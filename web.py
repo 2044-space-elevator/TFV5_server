@@ -518,7 +518,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         return bool_res()[True]
 
 
-    #实验性新特性：流式分块上传接口，支持超大文件上传。客户端将文件分割成多个块，每次上传一个块，并在最后一个块上传完成后进行文件合并和完整性校验。
+    # 实验性新特性：流式分块上传接口，支持超大文件上传。客户端将文件分割成多个块，每次上传一个块，并在最后一个块上传完成后进行文件合并和完整性校验。
     @api('/file/chunked_upload', methods=['POST'])
     def chunked_upload(req):
         """
