@@ -120,7 +120,10 @@ def create_new_server():
         "email_password" : "",
         "file_last_time" : 72,
         "groups_limit" : 30,
-        "single_group_max_people" : 200
+        "single_group_max_people" : 200,
+        "rate_limits" : {
+            "default" : {"requests": 60, "range": 60}
+        }
     }
     with open("res/{}/config.json".format(PORT_API), "w+") as file:
         json.dump(cfg, file) 

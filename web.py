@@ -1,4 +1,4 @@
-from flask import Flask, send_file
+from flask import Flask, send_file, request as flask_request
 import register_tool
 import base64
 from db import *
@@ -7,6 +7,7 @@ import file
 from sqlite3 import OperationalError
 import announcements
 from crypto import generate_rsa_keys, return_app_route
+from rate_limiter import RateLimiter
 import time
 import threading
 
@@ -22,6 +23,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     """
     app = Flask(__name__)
     api = return_app_route(app, pri)
+    limiter = RateLimiter(port_api)
     locks = {
         'config': threading.Lock(),
         'activate': threading.Lock(),
@@ -31,6 +33,13 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         'announcement': threading.Lock(),
     }
     
+    @app.before_request
+    def check_rate_limit():
+        ip = flask_request.remote_addr
+        endpoint = flask_request.path
+        if not limiter.is_allowed(ip, endpoint):
+            return "Too Many Requests", 429
+
     @app.route("/get_rsa_pub")
     def get_rsa_key():
         return send_file("res/{}/secret/pub.pem".format(port_api), download_name="{}.pem".format(port_api))
@@ -260,6 +269,44 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             cfg["captcha"] = final_stat
             with open("res/{}/config.json".format(port_api), "w+") as file:
                 json.dump(cfg, file)
+        return bool_res()[True]
+
+    @api("/auth/change_rate_limits", methods=['POST'])
+    def change_rate_limits(req):
+        """
+        更新端点速率限制配置。
+        仅 root 用户可操作。
+        
+        请求体示例：
+        {
+            "uid": 0,
+            "password": "xxx",
+            "rate_limits": {
+                "default":        {"requests": 60, "range": 60},
+                "/auth/login":    {"requests": 10, "range": 60},
+                "/auth/register": {"requests": 5,  "range": 300}
+            }
+        }
+        传入 null 可清空所有速率限制。
+        """
+        uid = req["uid"]
+        pwd = req["password"]
+        if not user_cursor.verify_user(uid, pwd):
+            return bool_res()[False]
+        if not user_cursor.uid_query(uid)[0][4] == 'root':
+            return bool_res()[False]
+        new_limits = req.get("rate_limits")
+        if new_limits is not None and not isinstance(new_limits, dict):
+            return bool_res()[False]
+        with locks['config']:
+            with open("res/{}/config.json".format(port_api), "r+") as f:
+                cfg = json.load(f)
+            if new_limits is None:
+                cfg.pop("rate_limits", None)
+            else:
+                cfg["rate_limits"] = new_limits
+            with open("res/{}/config.json".format(port_api), "w+") as f:
+                json.dump(cfg, f)
         return bool_res()[True]
 
     @app.route("/info")
