@@ -594,6 +594,11 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
+        with locks['config']:
+            with open("res/{}/config.json".format(port_api), "r+") as f:
+                max_file_size = json.load(f).get("max_file_size", 0)
+        if max_file_size != -1 and len(base64.b64decode(file_b64)) > max_file_size:
+            return bool_res()[False]
         file.upload_file(port_api, uid, file_b64, filename, file_cursor)
         return bool_res()[True]
 
