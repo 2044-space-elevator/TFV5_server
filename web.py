@@ -1,4 +1,4 @@
-from flask import Flask, send_file
+from flask import Flask, send_file, request as flask_request
 import register_tool
 import base64
 from db import *
@@ -7,7 +7,9 @@ import file
 from sqlite3 import OperationalError
 import announcements
 from crypto import generate_rsa_keys, return_app_route
+from rate_limiter import RateLimiter
 import time
+import threading
 
 def bool_res() -> tuple: 
     return (str(time.time()) + "False", str(time.time()) + "True")
@@ -21,7 +23,23 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     """
     app = Flask(__name__)
     api = return_app_route(app, pri)
+    limiter = RateLimiter(port_api)
+    locks = {
+        'config': threading.Lock(),
+        'activate': threading.Lock(),
+        'queue': threading.Lock(),
+        'comments': threading.Lock(),
+        'captcha': threading.Lock(),
+        'announcement': threading.Lock(),
+    }
     
+    @app.before_request
+    def check_rate_limit():
+        ip = flask_request.remote_addr
+        endpoint = flask_request.path
+        if not limiter.is_allowed(ip, endpoint):
+            return "Too Many Requests", 429
+
     @app.route("/get_rsa_pub")
     def get_rsa_key():
         return send_file("res/{}/secret/pub.pem".format(port_api), download_name="{}.pem".format(port_api))
@@ -51,11 +69,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
     @app.route('/auth/captcha')
     def get_captcha():
-        with open("res/{}/config.json".format(port_api), "r+") as file:
-            captcha = json.load(file)["captcha"]
+        with locks['config']:
+            with open("res/{}/config.json".format(port_api), "r+") as file:
+                captcha = json.load(file)["captcha"]
         if not captcha:
             return {}
-        token = register_tool.generate_captcha(port_api, ImgCaptcha)
+        token = register_tool.generate_captcha(port_api, ImgCaptcha, locks['captcha'])
         file_path = 'res/{}/captcha/{}.png'.format(port_api, token)
         with open(file_path, "rb") as file:
             ret_b64 = file.read()
@@ -73,18 +92,19 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         
         new_stat = req["change_to"]
-        with open("res/{}/config.json".format(port_api), "r+") as file:
-            cfg = json.load(file)
+        with locks['config']:
+            with open("res/{}/config.json".format(port_api), "r+") as file:
+                cfg = json.load(file)
 
-        if new_stat == False:
-            cfg["email_activate"] = ""
-            cfg["email_password"] = ""
-        else:
-            cfg["email_activate"] = req["verify_email"]
-            cfg["email_password"] = req["email_password"]
+            if new_stat == False:
+                cfg["email_activate"] = ""
+                cfg["email_password"] = ""
+            else:
+                cfg["email_activate"] = req["verify_email"]
+                cfg["email_password"] = req["email_password"]
 
-        with open("res/{}/config.json".format(port_api), "w+") as file:
-            json.dump(cfg, file)
+            with open("res/{}/config.json".format(port_api), "w+") as file:
+                json.dump(cfg, file)
         return bool_res()[True]
         
     @app.route("/auth/uid/<uid>")
@@ -134,15 +154,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         username = req["username"]
         password = req["password"]
         is_captcha = False
-        with open("res/{}/config.json".format(port_api), "r+") as file:
-            cfg = json.load(file)
-            is_captcha = cfg['captcha']
-            is_email_activate = cfg["email_activate"]
+        with locks['config']:
+            with open("res/{}/config.json".format(port_api), "r+") as file:
+                cfg = json.load(file)
+                is_captcha = cfg['captcha']
+                is_email_activate = cfg["email_activate"]
         
         if is_captcha:
             captcha_stamp = req["captcha_stamp"]
             captcha_code = req["captcha_code"]
-            if not register_tool.verify_captcha(port_api, captcha_stamp, captcha_code):
+            if not register_tool.verify_captcha(port_api, captcha_stamp, captcha_code, locks['captcha']):
                 return bool_res()[False]
         
         email = None
@@ -154,7 +175,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if not email:
                 return bool_res()[False]
             email_pwd = cfg["email_password"]
-            if not register_tool.email_code(sender_email, port_api, email, email_pwd):
+            if not register_tool.email_code(sender_email, port_api, email, email_pwd, locks['config'], locks['activate']):
                 return bool_res()[False]
 
         succeeded = user_cursor.user_create(username, password, time.time(), email)
@@ -170,10 +191,11 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         uid = req["uid"]
         activate_code = req["activate_code"]
         email = user_cursor.uid_query(uid)[0][2]
-        with open("res/{}/activate.json".format(port_api), "r+") as file:
-            if not email in json.load(file).keys():
-                return bool_res()[True]
-        if register_tool.verify_email(port_api, email, activate_code):
+        with locks['activate']:
+            with open("res/{}/activate.json".format(port_api), "r+") as file:
+                if not email in json.load(file).keys():
+                    return bool_res()[True]
+        if register_tool.verify_email(port_api, email, activate_code, locks['activate']):
             user_cursor.change_auth(uid, "user")
             return bool_res()[True]
         return bool_res()[False]
@@ -241,17 +263,57 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         if not user_cursor.uid_query(uid)[0][4] == 'root':
             return bool_res()[False]
-        with open("res/{}/config.json".format(port_api), "r+") as file:
-            cfg = json.load(file)
-        cfg["captcha"] = final_stat
-        with open("res/{}/config.json".format(port_api), "w+") as file:
-            json.dump(cfg, file)
+        with locks['config']:
+            with open("res/{}/config.json".format(port_api), "r+") as file:
+                cfg = json.load(file)
+            cfg["captcha"] = final_stat
+            with open("res/{}/config.json".format(port_api), "w+") as file:
+                json.dump(cfg, file)
+        return bool_res()[True]
+
+    @api("/auth/change_rate_limits", methods=['POST'])
+    def change_rate_limits(req):
+        """
+        更新端点速率限制配置。
+        仅 root 用户可操作。
+        
+        请求体示例：
+        {
+            "uid": 0,
+            "password": "xxx",
+            "rate_limits": {
+                "default":        {"requests": 60, "range": 60},
+                "/auth/login":    {"requests": 10, "range": 60},
+                "/auth/register": {"requests": 5,  "range": 300}
+            }
+        }
+        传入 null 可清空所有速率限制。
+        """
+        uid = req["uid"]
+        pwd = req["password"]
+        if not user_cursor.verify_user(uid, pwd):
+            return bool_res()[False]
+        if not user_cursor.uid_query(uid)[0][4] == 'root':
+            return bool_res()[False]
+        new_limits = req.get("rate_limits")
+        if new_limits is not None and not isinstance(new_limits, dict):
+            return bool_res()[False]
+        with locks['config']:
+            with open("res/{}/config.json".format(port_api), "r+") as f:
+                cfg = json.load(f)
+            if new_limits is None:
+                cfg.pop("rate_limits", None)
+            else:
+                cfg["rate_limits"] = new_limits
+            with open("res/{}/config.json".format(port_api), "w+") as f:
+                json.dump(cfg, f)
         return bool_res()[True]
 
     @app.route("/info")
     def info():
-        with open("res/{}/config.json".format(port_api), "r+") as file:
-            cfg = json.load(file)
+        with locks['config']:
+            with open("res/{}/config.json".format(port_api), "r+") as file:
+                cfg = json.load(file)
         ret = {}
         ret["server_name"] = cfg["server_name"]
         ret["port_api"] = port_api
@@ -277,20 +339,21 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         introduction = req["introduction"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
-            queue = json.load(file)
-        qid = queue['queue_num'] + 1
-        queue["queue_num"] = qid
-        for i in queue.keys():
-            if i.isdigit():
-                qid = max(qid, int(i) + 1)
-        queue[qid] = {
-            "creater" : uid,
-            "forumname" : forum_name,
-            "introduction" : introduction
-        } 
-        with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
-            json.dump(queue, file)
+        with locks['queue']:
+            with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
+                queue = json.load(file)
+            qid = queue['queue_num'] + 1
+            queue["queue_num"] = qid
+            for i in queue.keys():
+                if i.isdigit():
+                    qid = max(qid, int(i) + 1)
+            queue[qid] = {
+                "creater" : uid,
+                "forumname" : forum_name,
+                "introduction" : introduction
+            } 
+            with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
+                json.dump(queue, file)
         return bool_res()[True]
         
     @api("/forum/get_approving_forum_list", methods=['POST'])
@@ -302,7 +365,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not user_stat in ["admin", "root"]:
             return bool_res()[False]
-        return json.dumps(json.load(open("res/{}/forum/queue.json".format(port_api), "r+")), ensure_ascii=False)
+        with locks['queue']:
+            return json.dumps(json.load(open("res/{}/forum/queue.json".format(port_api), "r+")), ensure_ascii=False)
     
     @api("/forum/approve_forum", methods=["POST"])
     def approve_forum(req):
@@ -314,14 +378,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not user_stat in ["admin", "root"]:
             return bool_res()[False]
-        with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
-            queue = json.load(file)
-        fchosen = queue[str(qid)]
-        forum_cursor.create_forum(fchosen["forumname"], fchosen["creater"], fchosen["introduction"]) 
-        del queue[str(qid)]
-        queue["queue_num"] -= 1
-        with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
-            json.dump(queue, file)
+        with locks['queue']:
+            with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
+                queue = json.load(file)
+            fchosen = queue[str(qid)]
+            forum_cursor.create_forum(fchosen["forumname"], fchosen["creater"], fchosen["introduction"]) 
+            del queue[str(qid)]
+            queue["queue_num"] -= 1
+            with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
+                json.dump(queue, file)
         return bool_res()[True]
 
     @app.route("/forum/get_forum_list")
@@ -407,11 +472,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_cursor.uid_query(uid)[0][4]
         if user_stat == 'banned':
             return bool_res()[False]
-        with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
-            comments = json.load(file)
-        comments[str(fid)][str(pid)][str(time.time())] = [uid, comment]
-        with open("res/{}/forum/comments.json".format(port_api), "w+") as file:
-            json.dump(comments, file)
+        with locks['comments']:
+            with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
+                comments = json.load(file)
+            comments[str(fid)][str(pid)][str(time.time())] = [uid, comment]
+            with open("res/{}/forum/comments.json".format(port_api), "w+") as file:
+                json.dump(comments, file)
         comment_space_split : str = comment.split(' ')
         comment_at_split = comment_space_split.split('@')
         for block in comment_at_split:
@@ -430,8 +496,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return {}
         fid = int(fid)
         pid = int(pid)
-        with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
-            comments = json.load(file)
+        with locks['comments']:
+            with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
+                comments = json.load(file)
         return comments[str(fid)][str(pid)]
     
     @api("/forum/remove_comment", methods=['POST'])
@@ -445,15 +512,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         fid = req["fid"]
         pid = req["pid"]
         time_stamp = req["send_time"]
-        with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
-            comments = json.load(file)
-        creater = comments[str(fid)][str(pid)][time_stamp][0]
-        user_stat = user_cursor.uid_query(uid)[0][4]
-        if not (creater == uid or user_stat in ['admin', 'root']):
-            return bool_res()[False]
-        del comments[str(fid)][str(pid)][time_stamp]
-        with open("res/{}/forum/comments.json".format(port_api), "w+") as file:
-            json.dump(comments, file)
+        with locks['comments']:
+            with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
+                comments = json.load(file)
+            creater = comments[str(fid)][str(pid)][time_stamp][0]
+            user_stat = user_cursor.uid_query(uid)[0][4]
+            if not (creater == uid or user_stat in ['admin', 'root']):
+                return bool_res()[False]
+            del comments[str(fid)][str(pid)][time_stamp]
+            with open("res/{}/forum/comments.json".format(port_api), "w+") as file:
+                json.dump(comments, file)
         return bool_res()[True]
 
     @app.route("/avatar/get_avatar/<typ>/<tid>")
@@ -526,6 +594,11 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
+        with locks['config']:
+            with open("res/{}/config.json".format(port_api), "r+") as f:
+                max_file_size = json.load(f).get("max_file_size", 0)
+        if max_file_size != -1 and len(base64.b64decode(file_b64)) > max_file_size:
+            return bool_res()[False]
         file.upload_file(port_api, uid, file_b64, filename, file_cursor)
         return bool_res()[True]
 
@@ -564,7 +637,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not user_stat in ['admin', 'root']:
             return bool_res()[False]
-        announcements.upload_announcement(port_api, uid, content)
+        announcements.upload_announcement(port_api, uid, content, locks['announcement'])
         return bool_res()[True]
     
     @api("/announcement/edit_announcement", methods=['POST'])
@@ -583,7 +656,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not user_stat in ['admin', 'root']:
             return bool_res()[False]
-        return bool_res()[announcements.edit_announcement(port_api, time_stamp, content)] 
+        return bool_res()[announcements.edit_announcement(port_api, time_stamp, content, locks['announcement'])] 
     
     @api("/announcement/delete_announcement", methods=['POST'])
     def delete_announcement(req):
@@ -595,15 +668,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not user_stat in ['admin', 'root']:
             return bool_res()[False]
-        return bool_res()[announcements.delete_announcement(port_api, time_stamp)]
+        return bool_res()[announcements.delete_announcement(port_api, time_stamp, locks['announcement'])]
     
     @app.route("/announcement/query_all")
     def query_all():
-        return announcements.query_all(port_api)
+        return announcements.query_all(port_api, locks['announcement'])
     
     @app.route("/announcement/query_single/<time_stamp>")
     def query_single(time_stamp : str):
-        return announcements.query_single(port_api, time_stamp)
+        return announcements.query_single(port_api, time_stamp, locks['announcement'])
  
 
     @api("/group/create_group", methods=['POST'])

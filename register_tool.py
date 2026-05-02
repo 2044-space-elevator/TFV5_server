@@ -55,7 +55,7 @@ def delete_old_captcha(port_api : int):
             except:
                 continue
 
-def generate_captcha(port_api : int, Imgcaptcha):
+def generate_captcha(port_api : int, Imgcaptcha, lock):
     """
     生成验证码
     ImgCaptcha 是 captcha.ImageCaptcha 对象
@@ -67,52 +67,57 @@ def generate_captcha(port_api : int, Imgcaptcha):
     captcha_text = ''.join(answer)
     time_now = int(time())
     Imgcaptcha.write(captcha_text, 'res/{}/captcha/{}.png'.format(port_api, time_now))
-    with open("res/{}/captcha/captcha.json".format(port_api), "r+") as file:
-        cap = json.load(file)
-        cap[str(time_now)] = captcha_text
-    
-    with open("res/{}/captcha/captcha.json".format(port_api), "w+") as file:
-        json.dump(cap, file)
+    with lock:
+        with open("res/{}/captcha/captcha.json".format(port_api), "r+") as file:
+            cap = json.load(file)
+            cap[str(time_now)] = captcha_text
+        
+        with open("res/{}/captcha/captcha.json".format(port_api), "w+") as file:
+            json.dump(cap, file)
     return time_now
 
-def verify_captcha(port_api : int, time_stamp : int, verify_text : str):
+def verify_captcha(port_api : int, time_stamp : int, verify_text : str, lock):
     if time() - int(time_stamp) > MAX_DELAY:
         return False
     folder_path = "res/{}/captcha".format(port_api)
     if "{}.png".format(time_stamp) not in os.listdir(folder_path):
         return False
-    with open(folder_path + '/captcha.json', "r+") as file:
-        lst = json.load(file)
-        if (lst[str(time_stamp)].lower() == verify_text.lower()):
-            return True
-        else:
-            return False
+    with lock:
+        with open(folder_path + '/captcha.json', "r+") as file:
+            lst = json.load(file)
+            if (lst[str(time_stamp)].lower() == verify_text.lower()):
+                return True
+            else:
+                return False
 
-def email_code(sender_email : str, port_api : int, email : str, password : str):
+def email_code(sender_email : str, port_api : int, email : str, password : str, config_lock, activate_lock):
     session = login_email(sender_email, password)
     folder_path = "res/{}".format(port_api)
-    with open(folder_path + '/config.json', 'r+') as file:
-        sender = sender_email
-        server_name = json.load(file)["server_name"]
+    with config_lock:
+        with open(folder_path + '/config.json', 'r+') as file:
+            sender = sender_email
+            server_name = json.load(file)["server_name"]
     verify_code = randint(100000, 999999)
-    with open(folder_path + '/activate.json', 'r+') as file:
-        activate_lst = json.load(file)
-    activate_lst[email] = verify_code  
-    with open(folder_path + '/activate.json', 'r+') as file:
-        json.dump(activate_lst, file)
+    with activate_lock:
+        with open(folder_path + '/activate.json', 'r+') as file:
+            activate_lst = json.load(file)
+        activate_lst[email] = verify_code  
+        with open(folder_path + '/activate.json', 'w+') as file:
+            json.dump(activate_lst, file)
     return send_email(session, sender, email, "{} 验证码".format(server_name), "欢迎使用 {}，您的验证码是 {}。".format(server_name, verify_code))
 
-def verify_email(port_api : int, email : str, code : int):
+def verify_email(port_api : int, email : str, code : int, lock):
     folder_path = "res/{}/".format(port_api)
-    with open(folder_path + '/activate.json', 'r+') as file:
-        code_lst = json.load(file)
-        if not email in code_lst.keys():
-            return False
-        activate_code = code_lst[email]
+    with lock:
+        with open(folder_path + '/activate.json', 'r+') as file:
+            code_lst = json.load(file)
+            if not email in code_lst.keys():
+                return False
+            activate_code = code_lst[email]
 
-    code_lst[email] = -1
-    with open(folder_path + '/activate.json', 'w+') as file:
-        json.dump(code_lst, file)
+        code_lst[email] = -1
+        with open(folder_path + '/activate.json', 'w+') as file:
+            json.dump(code_lst, file)
     
     if activate_code == code:
         return True
