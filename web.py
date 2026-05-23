@@ -406,8 +406,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_cursor.uid_query(uid)[0][4]
         if user_stat == 'banned':
             return bool_res()[False]
-        forum_cursor.send_post(fid, uid, title, content)
-        return bool_res()[True]
+        return bool_res()[forum_cursor.send_post(fid, uid, title, content)]
 
 
     @app.route("/forum/get_post_list/<fid>")
