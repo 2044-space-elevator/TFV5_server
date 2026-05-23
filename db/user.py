@@ -12,6 +12,8 @@ class UserDb(Db):
     
     def verify_user(self,  uid, password):
         lst = self.uid_query(uid)
+        if not lst:
+            return False
         if pwd_verify(self.hasher, lst[0][3], password):
             return True
         return False

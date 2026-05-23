@@ -332,12 +332,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     def create_forum(req):
         uid = req["uid"]
         password = req["password"]
-        user_stat = user_cursor.uid_query(uid)[0][4]
-        if user_stat == 'banned':
-            return bool_res()[False]
         forum_name = req["forum_name"]
         introduction = req["introduction"]
         if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
             return bool_res()[False]
         with locks['queue']:
             with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
@@ -402,10 +402,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return {}
         title = req["title"]
         content = req["content"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
         user_stat = user_cursor.uid_query(uid)[0][4]
         if user_stat == 'banned':
-            return bool_res()[False]
-        if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         forum_cursor.send_post(fid, uid, title, content)
         return bool_res()[True]
@@ -464,9 +464,6 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         fid = req["fid"]
         pid = req["pid"]
         comment : str = req["comment"]
-        user_stat = user_cursor.uid_query(uid)[0][4]
-        if user_stat == 'banned':
-            return bool_res()[False]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         user_stat = user_cursor.uid_query(uid)[0][4]
@@ -588,10 +585,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         password = req["password"]
         filename = req["filename"]
         file_b64 = req["file_b64"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
         user_stat = user_cursor.uid_query(uid)[0][4]
         if user_stat == 'banned':
-            return bool_res()[False]
-        if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         with locks['config']:
             with open("res/{}/config.json".format(port_api), "r+") as f:
@@ -684,14 +681,14 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         password = req["password"]
         groupname = req["groupname"]
         introduction = req["introduction"]
-        user_stat = user_cursor.uid_query(uid)[0][4]
-        if user_stat == 'banned':
-            return bool_res()[False]
         if not "enter_hint" in req:
             enter_hint = ""
         else:
             enter_hint = req["enter_hint"]
         if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
             return bool_res()[False]
         return bool_res()[group_cursor.create_group(uid, groupname, enter_hint, introduction)]
     
