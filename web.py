@@ -478,14 +478,13 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             comments[str(fid)][str(pid)][str(time.time())] = [uid, comment]
             with open("res/{}/forum/comments.json".format(port_api), "w+") as file:
                 json.dump(comments, file)
-        comment_space_split : str = comment.split(' ')
-        comment_at_split = comment_space_split.split('@')
-        for block in comment_at_split:
-            if '@' != block[0]:
-                continue
-            at_user = block[1:]
-            if not user_cursor.username_query(at_user):
-                continue 
+            for block in comment.split():
+                if not block.startswith('@') or len(block) < 2:
+                    continue
+                at_user = block[1:]
+                if not user_cursor.username_query(at_user):
+                    continue
+
             # instant_contact.
 
         return bool_res()[True]
