@@ -146,8 +146,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not user_cursor.verify_user(uid, pwd):
             return bool_res()[False]
         new_email = req["new_email"]
-        user_cursor.change_email(uid, new_email)
-        return bool_res()[True]
+        return bool_res()[user_cursor.change_email(uid, new_email)]
 
     @api("/auth/register", methods=['POST'])
     def register(req):

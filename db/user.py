@@ -37,10 +37,7 @@ class UserDb(Db):
         if self.username_query(username):
             return False
         
-        if email and not re.fullmatch(email_regex, email):
-            return False
-
-        if email and self.email_query(email):
+        if email and not self.validate_email(email):
             return False
 
         uid = self.query("SELECT MAX(uid) from users")[0][0]
@@ -73,6 +70,19 @@ class UserDb(Db):
         根据邮箱查询用户基本信息
         """
         return self.query("SELECT * FROM users WHERE email = ?",  (email,))
+
+    def validate_email(self, email : str, current_uid=None):
+        if not re.fullmatch(email_regex, email):
+            return False
+
+        existed = self.email_query(email)
+        if not existed:
+            return True
+
+        if current_uid is not None and existed[0][0] == current_uid:
+            return True
+
+        return False
 
     def create_user_table(self):
         cmd = """
@@ -147,7 +157,14 @@ class UserDb(Db):
         self.execute("UPDATE users SET stat = ? where uid = ?", (new_auth, oped))
     
     def change_email(self, oped : int, new_email : str):
-        self.execute("UPDATE users SET email = ? where uid = ?", (new_email, oped))
+        if not self.validate_email(new_email, oped):
+            return False
+        try:
+            self.execute("UPDATE users SET email = ? where uid = ?", (new_email, oped))
+            return True
+        except Exception as e:
+            print(e)
+            return False
     
     def change_sign(self, oped : int, new_sign : str):
         self.execute("UPDATE users SET sign = ? where uid = ?", (new_sign, oped))
