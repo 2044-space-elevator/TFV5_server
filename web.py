@@ -29,7 +29,6 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         'config': threading.Lock(),
         'activate': threading.Lock(),
         'queue': threading.Lock(),
-        'comments': threading.Lock(),
         'captcha': threading.Lock(),
         'announcement': threading.Lock(),
     }
@@ -600,15 +599,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if user_stat == 'banned':
             return bool_res()[False]
         comment_time = str(time.time())
-        with locks['comments']:
-            with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
-                comments = json.load(file)
+        def add_comment(comments):
             thread = get_comment_thread(comments, fid, pid)
             if thread is None:
-                return bool_res()[False]
+                return False
             thread[comment_time] = [uid, comment]
-            with open("res/{}/forum/comments.json".format(port_api), "w+") as file:
-                json.dump(comments, file)
+            return True
+
+        if not update_comments(port_api, add_comment):
+            return bool_res()[False]
 
         def send_comment_notifications():
             sender_name = user_cursor.uid_query(uid)[0][1]
@@ -638,9 +637,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return {}
         fid = int(fid)
         pid = int(pid)
-        with locks['comments']:
-            with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
-                comments = json.load(file)
+        comments = read_comments(port_api)
         thread = get_comment_thread(comments, fid, pid)
         if thread is None:
             return {}
@@ -657,19 +654,20 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         fid = req["fid"]
         pid = req["pid"]
         time_stamp = req["send_time"]
-        with locks['comments']:
-            with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
-                comments = json.load(file)
+        user_stat = user_cursor.uid_query(uid)[0][4]
+
+        def remove_comment_entry(comments):
             thread = get_comment_thread(comments, fid, pid)
             if thread is None or time_stamp not in thread:
-                return bool_res()[False]
+                return False
             creater = thread[time_stamp][0]
-            user_stat = user_cursor.uid_query(uid)[0][4]
             if not (creater == uid or user_stat in ['admin', 'root']):
-                return bool_res()[False]
+                return False
             del thread[time_stamp]
-            with open("res/{}/forum/comments.json".format(port_api), "w+") as file:
-                json.dump(comments, file)
+            return True
+
+        if not update_comments(port_api, remove_comment_entry):
+            return bool_res()[False]
         return bool_res()[True]
 
     @app.route("/avatar/get_avatar/<typ>/<tid>")

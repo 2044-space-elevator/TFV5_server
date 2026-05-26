@@ -1,6 +1,40 @@
 from db.tool import Db
 from time import time
 import json
+import threading
+
+
+_comments_locks = {}
+_comments_locks_lock = threading.Lock()
+
+
+def comments_path(port_api : int):
+    return "res/{}/forum/comments.json".format(port_api)
+
+
+def get_comments_lock(port_api : int):
+    with _comments_locks_lock:
+        lock = _comments_locks.get(port_api)
+        if lock is None:
+            lock = threading.Lock()
+            _comments_locks[port_api] = lock
+        return lock
+
+
+def read_comments(port_api : int):
+    with get_comments_lock(port_api):
+        with open(comments_path(port_api), "r", encoding="utf-8") as file:
+            return json.load(file)
+
+
+def update_comments(port_api : int, callback):
+    with get_comments_lock(port_api):
+        with open(comments_path(port_api), "r+", encoding="utf-8") as file:
+            comments = json.load(file)
+        result = callback(comments)
+        with open(comments_path(port_api), "w+", encoding="utf-8") as file:
+            json.dump(comments, file)
+        return result
 
 class ForumDb(Db):
     def __init__(self, path : str, port_api : int, port_tcp : int):
@@ -44,11 +78,7 @@ class ForumDb(Db):
     """
         self.execute("INSERT INTO forums (fid, forumname, creater, create_time, introduction, post_num) VALUES (?, ?, ?, ?, ?, 0)", (fid, forumname, creater, time(), introduction))
         self.execute(cmd.format(fid))
-        with open("res/{}/forum/comments.json".format(self.api_pt), "r+") as file:
-            comments = json.load(file)
-        comments[fid] = {}
-        with open("res/{}/forum/comments.json".format(self.api_pt), "w+") as file:
-            json.dump(comments, file)
+        update_comments(self.api_pt, lambda comments: comments.setdefault(str(fid), {}))
         return fid
     
     def query_forum_fid(self, fid):
@@ -88,26 +118,22 @@ class ForumDb(Db):
             pid += 1
         self.execute("INSERT INTO F{} (pid, title, creater, content, send_time) VALUES (?, ?, ?, ?, ?)".format(fid), (pid, title, sender, content, time()))
         self.execute("UPDATE forums set post_num = post_num + 1 where fid = ?", (fid,))
-        with open("res/{}/forum/comments.json".format(self.api_pt), "r+") as file:
-            comments = json.load(file)
-        comments[str(fid)][str(pid)] = {}
-        with open("res/{}/forum/comments.json".format(self.api_pt), "w+") as file:
-            json.dump(comments, file)
+        def add_post_bucket(comments):
+            comments.setdefault(str(fid), {})[str(pid)] = {}
+
+        update_comments(self.api_pt, add_post_bucket)
         return True
     
     def delete_forum(self, fid : int):
         self.execute("DELETE FROM forums WHERE fid = ?", (fid, ))
         self.execute("DROP TABLE IF EXISTS F{}".format(fid))
-        with open("res/{}/forum/comments.json".format(self.api_pt), "r+") as file:
-            comments = json.load(file)
-        del comments[str(fid)]
-        with open("res/{}/forum/comments.json".format(self.api_pt), "w+") as file:
-            json.dump(comments, file)
+        update_comments(self.api_pt, lambda comments: comments.pop(str(fid), None))
 
     def delete_post(self, fid : int, pid : int):
         self.execute("DELETE FROM F{} where pid = ?".format(fid), (pid,))
-        with open("res/{}/forum/comments.json".format(self.api_pt), "r+") as file:
-            comments = json.load(file)
-        del comments[str(fid)][str(pid)]
-        with open("res/{}/forum/comments.json".format(self.api_pt), "w+") as file:
-            json.dump(comments, file)
+        def remove_post_bucket(comments):
+            forum_comments = comments.get(str(fid))
+            if isinstance(forum_comments, dict):
+                forum_comments.pop(str(pid), None)
+
+        update_comments(self.api_pt, remove_post_bucket)
