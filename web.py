@@ -93,6 +93,27 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 mentioned_uids.add(info[0][0])
         return mentioned_uids
 
+    def query_forum(fid):
+        try:
+            return forum_cursor.query_forum_fid(fid) or []
+        except Exception:
+            return []
+
+    def query_post(fid, pid):
+        try:
+            return forum_cursor.query_post_pid(fid, pid) or []
+        except Exception:
+            return []
+
+    def get_comment_thread(comments : dict, fid, pid):
+        forum_comments = comments.get(str(fid))
+        if not isinstance(forum_comments, dict):
+            return None
+        post_comments = forum_comments.get(str(pid))
+        if not isinstance(post_comments, dict):
+            return None
+        return post_comments
+
     def serialize_notifications(rows):
         return json.dumps(notification_cursor.serialize_rows(rows), ensure_ascii=False)
     
@@ -484,6 +505,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         with locks['queue']:
             with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
                 queue = json.load(file)
+            if str(qid) not in queue:
+                return bool_res()[False]
             fchosen = queue[str(qid)]
             fid = forum_cursor.create_forum(fchosen["forumname"], fchosen["creater"], fchosen["introduction"]) 
             del queue[str(qid)]
@@ -511,6 +534,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_cursor.uid_query(uid)[0][4]
         if user_stat == 'banned':
             return bool_res()[False]
+        if not query_forum(fid):
+            return bool_res()[False]
         return bool_res()[forum_cursor.send_post(fid, uid, title, content)]
 
 
@@ -528,9 +553,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         uid = req["uid"]
         password = req["password"]
         fid = req["fid"]
-        creater = forum_cursor.query_forum_fid(fid)[0][2]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
+        forum_info = query_forum(fid)
+        if not forum_info:
+            return bool_res()[False]
+        creater = forum_info[0][2]
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not (user_stat in ["admin", "root"] or uid == creater):
             return bool_res()[False]
@@ -542,11 +570,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         uid = req["uid"]
         password = req["password"]
         fid = req["fid"]
-        creater = forum_cursor.query_forum_fid(fid)[0][2]
         pid = req["pid"]
-        creater_post = forum_cursor.query_post_pid(fid, pid)[0][2]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
+        forum_info = query_forum(fid)
+        post_info = query_post(fid, pid)
+        if not forum_info or not post_info:
+            return bool_res()[False]
+        creater = forum_info[0][2]
+        creater_post = post_info[0][2]
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not (user_stat in ["admin", "root"] or uid == creater or uid == creater_post):
             return bool_res()[False]
@@ -571,7 +603,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         with locks['comments']:
             with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
                 comments = json.load(file)
-            comments[str(fid)][str(pid)][comment_time] = [uid, comment]
+            thread = get_comment_thread(comments, fid, pid)
+            if thread is None:
+                return bool_res()[False]
+            thread[comment_time] = [uid, comment]
             with open("res/{}/forum/comments.json".format(port_api), "w+") as file:
                 json.dump(comments, file)
 
@@ -606,7 +641,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         with locks['comments']:
             with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
                 comments = json.load(file)
-        return comments[str(fid)][str(pid)]
+        thread = get_comment_thread(comments, fid, pid)
+        if thread is None:
+            return {}
+        return thread
     
     @api("/forum/remove_comment", methods=['POST'])
     def remove_comment(req):
@@ -622,11 +660,14 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         with locks['comments']:
             with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
                 comments = json.load(file)
-            creater = comments[str(fid)][str(pid)][time_stamp][0]
+            thread = get_comment_thread(comments, fid, pid)
+            if thread is None or time_stamp not in thread:
+                return bool_res()[False]
+            creater = thread[time_stamp][0]
             user_stat = user_cursor.uid_query(uid)[0][4]
             if not (creater == uid or user_stat in ['admin', 'root']):
                 return bool_res()[False]
-            del comments[str(fid)][str(pid)][time_stamp]
+            del thread[time_stamp]
             with open("res/{}/forum/comments.json".format(port_api), "w+") as file:
                 json.dump(comments, file)
         return bool_res()[True]
@@ -652,7 +693,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         fid = req["fid"]
         pic_b64 = req["pic"]
         user_stat = user_cursor.uid_query(uid)[0][4]
-        creater = forum_cursor.query_forum_fid(fid)[0][2]
+        forum_info = query_forum(fid)
+        if not forum_info:
+            return bool_res()[False]
+        creater = forum_info[0][2]
         if uid == creater or user_stat in ['admin', 'root']:
             avatar.upload_avatar(port_api, fid, pic_b64, 'forum')
             return bool_res()[True]
