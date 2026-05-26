@@ -130,7 +130,13 @@ class ForumDb(Db):
         update_comments(self.api_pt, lambda comments: comments.pop(str(fid), None))
 
     def delete_post(self, fid : int, pid : int):
+        if not self.query_post_pid(fid, pid):
+            return
         self.execute("DELETE FROM F{} where pid = ?".format(fid), (pid,))
+        self.execute(
+            "UPDATE forums set post_num = CASE WHEN post_num > 0 THEN post_num - 1 ELSE 0 END where fid = ?",
+            (fid,)
+        )
         def remove_post_bucket(comments):
             forum_comments = comments.get(str(fid))
             if isinstance(forum_comments, dict):
