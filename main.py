@@ -1,4 +1,5 @@
 import json
+import asyncio
 from argon2 import PasswordHasher
 from channel import InstantConnect
 from captcha.image import ImageCaptcha
@@ -50,6 +51,8 @@ PUB_KEY = None
 PRI_KEY = None
 FLASK_APP = None
 FLASK_THREAD = None
+TCP_THREAD = None
+INSTANT_CONTACT = None
 IMGCAPTCHA = None
 HASHER = None
 
@@ -170,9 +173,13 @@ def create_new_server():
 def flask_thread():
     FLASK_APP.run(host='0.0.0.0', port = PORT_API, debug=False)
 
+def tcp_thread():
+    asyncio.run(INSTANT_CONTACT.main())
+
 def main():
     global IMGCAPTCHA
     global FLASK_THREAD
+    global INSTANT_CONTACT
     global PORT_API
     global PORT_TCP
     global PUB_KEY
@@ -244,6 +251,9 @@ if __name__ == '__main__':
         main()
         if FLASK_THREAD:
             FLASK_THREAD.start()
+        if INSTANT_CONTACT:
+            TCP_THREAD = threading.Thread(target=tcp_thread, name="tfv5-tcp-server")
+            TCP_THREAD.start()
     except Exception as e:
         prt(e, "red")
         prt("运行或操作错误，程序终止", "red")

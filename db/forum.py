@@ -49,6 +49,7 @@ class ForumDb(Db):
         comments[fid] = {}
         with open("res/{}/forum/comments.json".format(self.api_pt), "w+") as file:
             json.dump(comments, file)
+        return fid
     
     def query_forum_fid(self, fid):
         return self.query("SELECT * FROM forums WHERE fid = ?", (fid,))

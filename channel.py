@@ -3,7 +3,6 @@ from argon2 import PasswordHasher
 import db
 import json
 import crypto
-import time
 import asyncio
 import base64
 
@@ -11,6 +10,7 @@ class InstantConnect():
     def __init__(self, port_api, port_tcp, notifiaction_cursor, user_cursor):
         self.port_api = port_api
         self.port_tcp = port_tcp
+        self.notification_cursor = notifiaction_cursor
         self.connected_clients = dict()
         self.connected_clients[-1] = []
         self.clients_belonged = dict()
@@ -18,6 +18,7 @@ class InstantConnect():
         self.user_cursor = user_cursor
         self.aes_key = dict() 
         self.pri_key = crypto.load_pri("res/{}/secret/pri.pem".format(port_api))
+        self.loop = None
     
     def encrypt_response(self, req : dict, websocket):
         json_req = json.dumps(req)
@@ -25,17 +26,43 @@ class InstantConnect():
         iv = base64.b64encode(iv).decode('utf-8')
         content = base64.b64encode(content).decode('utf-8')
         return json.dumps({"iv" : iv, "content" : content}) 
-    
-    def send_to_client(self, websocket, message : dict):
-        self.send_queue[websocket].put(message)
-        notification_cursor.add_event(self.clients_belonged[websocket], message)
+
+    def _cleanup_client(self, websocket):
+        uid = self.clients_belonged.pop(websocket, -1)
+        if uid in self.connected_clients and websocket in self.connected_clients[uid]:
+            self.connected_clients[uid].remove(websocket)
+            if uid != -1 and not self.connected_clients[uid]:
+                del self.connected_clients[uid]
+        elif websocket in self.connected_clients[-1]:
+            self.connected_clients[-1].remove(websocket)
+        self.send_queue.pop(websocket, None)
+        self.aes_key.pop(websocket, None)
+
+    async def _queue_message(self, websocket, message : dict):
+        queue = self.send_queue.get(websocket)
+        if queue is not None:
+            await queue.put(message)
+
+    def notify_user(self, uid : int, notification : dict):
+        record = {
+            "time_stamp" : self.notification_cursor.add_event(uid, notification),
+            "info" : notification
+        }
+        if self.loop is None:
+            return record
+        for websocket in list(self.connected_clients.get(uid, [])):
+            asyncio.run_coroutine_threadsafe(
+                self._queue_message(websocket, {"type" : "NOTIFICATION.NEW", "notification" : record}),
+                self.loop
+            )
+        return record
     
     async def sender(self, websocket, queue):
         try:
             while True:
                 message = await queue.get()
-                await websocket.send(self.encrypt_response(message))
-        except asyncio.CancelledError:
+                await websocket.send(self.encrypt_response(message, websocket))
+        except (asyncio.CancelledError, websockets.exceptions.ConnectionClosed):
             pass
     
     async def handler(self, websocket : websockets.ClientConnection):
@@ -50,8 +77,7 @@ class InstantConnect():
             self.aes_key[websocket] = crypto.decrypt(self.pri_key, message["aes_key"]) 
 
         except Exception as e:
-            self.connected_clients[-1].remove(websocket)
-            del self.clients_belonged[websocket]
+            self._cleanup_client(websocket)
             print("[ERR] 客户端链接 WS 服务器后没有发出 AES 密钥声明")
             return
         
@@ -68,13 +94,12 @@ class InstantConnect():
                 self.connected_clients[message['uid']] = []
             self.connected_clients[message['uid']].append(websocket)
             self.clients_belonged[websocket] = message['uid']
-            await websocket.send(self.encrypt_response({"type" : "AUTH.LOGIN_SUCCEEDED"}, websocket))
             self.send_queue[websocket] = asyncio.Queue()
+            await websocket.send(self.encrypt_response({"type" : "AUTH.LOGIN_SUCCEEDED"}, websocket))
 
         except Exception as e:
             print("[ERR] 客户端链接 WS 服务器后没有登录")
-            del self.clients_belonged[websocket]
-            self.connected_clients[-1].remove(websocket)
+            self._cleanup_client(websocket)
             return
         
         send_task = asyncio.create_task(self.sender(websocket, self.send_queue[websocket]))
@@ -86,10 +111,11 @@ class InstantConnect():
             pass
         finally:
             send_task.cancel()
-            del self.send_queue[websocket]
+            self._cleanup_client(websocket)
             
 
     async def main(self):
+        self.loop = asyncio.get_running_loop()
         async with websockets.serve(self.handler, "0.0.0.0", self.port_tcp):
             await asyncio.Future() 
 
