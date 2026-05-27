@@ -61,12 +61,6 @@ class ForumDb(Db):
         :param creater: 创建者（uid）
         :param introduction: 论坛简介
         """
-        fid = self.query("SELECT MAX(fid) from forums")[0][0]
-        if fid == None:
-            fid = 0
-        else:
-            fid += 1
-        
         cmd = """
     CREATE TABLE IF NOT EXISTS F{} (
         pid INTEGER UNIQUE NOT NULL,
@@ -76,8 +70,25 @@ class ForumDb(Db):
         send_time TEXT REAL
     )  
     """
-        self.execute("INSERT INTO forums (fid, forumname, creater, create_time, introduction, post_num) VALUES (?, ?, ?, ?, ?, 0)", (fid, forumname, creater, time(), introduction))
-        self.execute(cmd.format(fid))
+
+        def insert_forum():
+            self.cursor.execute("SELECT MAX(fid) from forums")
+            fid = self.cursor.fetchone()[0]
+            if fid == None:
+                fid = 0
+            else:
+                fid += 1
+            self.cursor.execute(
+                "INSERT INTO forums (fid, forumname, creater, create_time, introduction, post_num) VALUES (?, ?, ?, ?, ?, 0)",
+                (fid, forumname, creater, time(), introduction)
+            )
+            self.cursor.execute(cmd.format(fid))
+            self.conn.commit()
+            return fid
+
+        with self.lock:
+            fid = self._execute_with_retry(insert_forum)
+
         update_comments(self.api_pt, lambda comments: comments.setdefault(str(fid), {}))
         return fid
     
@@ -111,13 +122,24 @@ class ForumDb(Db):
     def send_post(self, fid : int, sender : int, title : str, content : str):
         if len(title) > 30:
             return False
-        pid = self.query("SELECT MAX(pid) from F{}".format(fid))[0][0]
-        if pid == None:
-            pid = 0
-        else:
-            pid += 1
-        self.execute("INSERT INTO F{} (pid, title, creater, content, send_time) VALUES (?, ?, ?, ?, ?)".format(fid), (pid, title, sender, content, time()))
-        self.execute("UPDATE forums set post_num = post_num + 1 where fid = ?", (fid,))
+        def insert_post():
+            self.cursor.execute("SELECT MAX(pid) from F{}".format(fid))
+            pid = self.cursor.fetchone()[0]
+            if pid == None:
+                pid = 0
+            else:
+                pid += 1
+            self.cursor.execute(
+                "INSERT INTO F{} (pid, title, creater, content, send_time) VALUES (?, ?, ?, ?, ?)".format(fid),
+                (pid, title, sender, content, time())
+            )
+            self.cursor.execute("UPDATE forums set post_num = post_num + 1 where fid = ?", (fid,))
+            self.conn.commit()
+            return pid
+
+        with self.lock:
+            pid = self._execute_with_retry(insert_post)
+
         def add_post_bucket(comments):
             comments.setdefault(str(fid), {})[str(pid)] = {}
 
