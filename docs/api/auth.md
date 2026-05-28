@@ -26,7 +26,7 @@
 
 其中 `<sign>` 是新的个性签名。
 
-返回：若密码更改成功，返回时间戳加 `True`，否则返回时间戳加 `False`。
+返回：若更改成功，返回时间戳加 `True`，否则返回时间戳加 `False`。
 
 - `^ POST  /auth/change_introduction` 改变个人简介
 
@@ -40,7 +40,7 @@
 
 其中 `<new_intro>` 是新的个人简介
 
-返回：若密码更改成功，返回时间戳加 `True`，否则返回时间戳加 `False`。
+返回：若更改成功，返回时间戳加 `True`，否则返回时间戳加 `False`。
 
 - `^ POST  /auth/change_pwd`  改变用户密码
 
@@ -71,7 +71,7 @@
 
 返回体：若更改成功，返回时间戳加 `True`。若无权限或更改失败，返回时间戳加 `False`。
 
-- `^ POST /auth/chagne_captcha` 改变是否要开启图片验证码注册
+- `^ POST /auth/change_captcha` 改变是否要开启图片验证码注册
 
 请求体：
 
@@ -95,7 +95,7 @@
 {
     "change_to" : <new_stat>,
     "verify_email" : <verify_email>,
-    "email_password: <email_pwd>
+    "email_password" : <email_pwd>
 }
 ```
 
@@ -119,7 +119,7 @@
 
 返回体：操作成功返回时间戳加 `True`，否则返回时间戳加 `False`。
 
-- `* GET /auth/captcha/` 获取证码图片
+- `* GET /auth/captcha` 获取验证码图片
 
 请求体：无
 
@@ -194,7 +194,7 @@
 
 如果服务器不启用图形验证码， `<captcha_stamp>` 和 `<captcha_code>` 是可以省略的。
 
-**`captcha_stamp` 是字符串**。
+`captcha_stamp` 请填写 `/auth/captcha` 返回体中的 `stamp`。该值实际返回为整数时间戳；服务端校验时会将其转为整数处理。
 
 如果服务器不启用邮箱激活，`<email>` 是可以省略的。
 

@@ -69,8 +69,9 @@
         <forum_id>,
         <forumname>,
         <creater_id>,
-        <creater_time>,
-        <introduction>
+        <create_time>,
+        <introduction>,
+        <post_num>
     ],
     ...
 ]
@@ -90,7 +91,7 @@
 }
 ```
 
-- `* GET /get_post_list/<fid>` 获取某一论坛的所有帖子
+- `* GET /forum/get_post_list/<fid>` 获取某一论坛的所有帖子
 
 返回体：
 
@@ -101,7 +102,7 @@
         <title>,
         <creater>,
         <content>,
-        <create_time>
+        <send_time>
     ]
 ]
 ```
@@ -120,7 +121,7 @@
 ```
 
 
-- `^ POST /forum/remove_post` 删除论坛
+- `^ POST /forum/remove_forum` 删除论坛
 
 **只有论坛创始人、管理员有权限操作**
 
