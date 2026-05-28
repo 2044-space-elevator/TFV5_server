@@ -1,4 +1,5 @@
 from flask import Flask, send_file, request as flask_request
+import json
 import register_tool
 import base64
 from db import *
@@ -28,10 +29,92 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         'config': threading.Lock(),
         'activate': threading.Lock(),
         'queue': threading.Lock(),
-        'comments': threading.Lock(),
         'captcha': threading.Lock(),
         'announcement': threading.Lock(),
     }
+
+    def build_notification(event : str, title : str, content : str, sender=None, meta=None):
+        return {
+            "event" : event,
+            "title" : title,
+            "content" : content,
+            "sender" : sender,
+            "meta" : meta or {}
+        }
+
+    def run_notification_side_effect(action : str, callback):
+        try:
+            return callback()
+        except Exception as e:
+            print("[WARN] 通知流程失败({}): {}".format(action, e))
+            return None
+
+    def notify_user(target_uid : int, event : str, title : str, content : str, sender=None, meta=None):
+        def callback():
+            if not user_cursor.uid_query(target_uid):
+                return None
+            return instant_contact.notify_user(target_uid, build_notification(event, title, content, sender, meta))
+        return run_notification_side_effect("notify_user/{}".format(event), callback)
+
+    def notify_users(target_uids, event : str, title : str, content : str, sender=None, meta=None):
+        def callback():
+            sent = set()
+            records = []
+            for target_uid in target_uids:
+                if target_uid in sent or target_uid is None:
+                    continue
+                sent.add(target_uid)
+                record = notify_user(target_uid, event, title, content, sender, meta)
+                if record is not None:
+                    records.append(record)
+            return records
+        records = run_notification_side_effect("notify_users/{}".format(event), callback)
+        if records is None:
+            return []
+        return records
+
+    def all_user_ids():
+        ret = run_notification_side_effect("all_user_ids", lambda: [row[0] for row in user_cursor.query("SELECT uid FROM users")])
+        if ret is None:
+            return []
+        return ret
+
+    def extract_mentioned_uids(comment : str):
+        mentioned_uids = set()
+        for block in comment.split():
+            if not block.startswith('@') or len(block) < 2:
+                continue
+            username = block[1:].strip(".,!?，。！？:：;；)]】}>\"'")
+            if not username:
+                continue
+            info = user_cursor.username_query(username)
+            if info:
+                mentioned_uids.add(info[0][0])
+        return mentioned_uids
+
+    def query_forum(fid):
+        try:
+            return forum_cursor.query_forum_fid(fid) or []
+        except Exception:
+            return []
+
+    def query_post(fid, pid):
+        try:
+            return forum_cursor.query_post_pid(fid, pid) or []
+        except Exception:
+            return []
+
+    def get_comment_thread(comments : dict, fid, pid):
+        forum_comments = comments.get(str(fid))
+        if not isinstance(forum_comments, dict):
+            return None
+        post_comments = forum_comments.get(str(pid))
+        if not isinstance(post_comments, dict):
+            return None
+        return post_comments
+
+    def serialize_notifications(rows):
+        return json.dumps(notification_cursor.serialize_rows(rows), ensure_ascii=False)
     
     @app.before_request
     def check_rate_limit():
@@ -146,8 +229,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not user_cursor.verify_user(uid, pwd):
             return bool_res()[False]
         new_email = req["new_email"]
-        user_cursor.change_email(uid, new_email)
-        return bool_res()[True]
+        return bool_res()[user_cursor.change_email(uid, new_email)]
 
     @api("/auth/register", methods=['POST'])
     def register(req):
@@ -230,6 +312,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                     return bool_res()[False]
             
             user_cursor.change_auth(oped, new_auth)
+            notify_user(oped, "auth.stat.changed", "账号状态已变更", "你的账号状态已更新为 {}。".format(new_auth), sender=uid, meta={"new_auth" : new_auth})
             return bool_res()[True]
         except:
             return bool_res()[False]
@@ -309,6 +392,46 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 json.dump(cfg, f)
         return bool_res()[True]
 
+    @api("/notification/query_all", methods=['POST'])
+    def query_all_notifications(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        return serialize_notifications(notification_cursor.query_all_events(uid))
+
+    @api("/notification/query_after", methods=['POST'])
+    def query_notifications_after(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        try:
+            time_stamp = float(req.get("time_stamp", 0))
+        except (TypeError, ValueError):
+            return bool_res()[False]
+        return serialize_notifications(notification_cursor.query_events_after(uid, time_stamp))
+
+    @api("/notification/delete_before", methods=['POST'])
+    def delete_notifications_before(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        try:
+            time_stamp = float(req["time_stamp"])
+        except (KeyError, TypeError, ValueError):
+            return bool_res()[False]
+        return bool_res()[notification_cursor.delete_events_before(uid, time_stamp)]
+
+    @api("/notification/delete_all", methods=['POST'])
+    def delete_all_notifications(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        return bool_res()[notification_cursor.delete_all_events(uid)]
+
     @app.route("/info")
     def info():
         with locks['config']:
@@ -332,12 +455,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     def create_forum(req):
         uid = req["uid"]
         password = req["password"]
-        user_stat = user_cursor.uid_query(uid)[0][4]
-        if user_stat == 'banned':
-            return bool_res()[False]
         forum_name = req["forum_name"]
         introduction = req["introduction"]
         if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
             return bool_res()[False]
         with locks['queue']:
             with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
@@ -381,12 +504,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         with locks['queue']:
             with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
                 queue = json.load(file)
+            if str(qid) not in queue:
+                return bool_res()[False]
             fchosen = queue[str(qid)]
-            forum_cursor.create_forum(fchosen["forumname"], fchosen["creater"], fchosen["introduction"]) 
+            fid = forum_cursor.create_forum(fchosen["forumname"], fchosen["creater"], fchosen["introduction"]) 
             del queue[str(qid)]
             queue["queue_num"] -= 1
             with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
                 json.dump(queue, file)
+        notify_user(fchosen["creater"], "forum.approved", "论坛已通过审核", "你创建的论坛 {} 已通过审核。".format(fchosen["forumname"]), sender=uid, meta={"fid" : fid, "forum_name" : fchosen["forumname"]})
         return bool_res()[True]
 
     @app.route("/forum/get_forum_list")
@@ -402,13 +528,14 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return {}
         title = req["title"]
         content = req["content"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
         user_stat = user_cursor.uid_query(uid)[0][4]
         if user_stat == 'banned':
             return bool_res()[False]
-        if not user_cursor.verify_user(uid, password):
+        if not query_forum(fid):
             return bool_res()[False]
-        forum_cursor.send_post(fid, uid, title, content)
-        return bool_res()[True]
+        return bool_res()[forum_cursor.send_post(fid, uid, title, content)]
 
 
     @app.route("/forum/get_post_list/<fid>")
@@ -425,9 +552,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         uid = req["uid"]
         password = req["password"]
         fid = req["fid"]
-        creater = forum_cursor.query_forum_fid(fid)[0][2]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
+        forum_info = query_forum(fid)
+        if not forum_info:
+            return bool_res()[False]
+        creater = forum_info[0][2]
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not (user_stat in ["admin", "root"] or uid == creater):
             return bool_res()[False]
@@ -439,11 +569,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         uid = req["uid"]
         password = req["password"]
         fid = req["fid"]
-        creater = forum_cursor.query_forum_fid(fid)[0][2]
         pid = req["pid"]
-        creater_post = forum_cursor.query_post_pid(fid, pid)[0][2]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
+        forum_info = query_forum(fid)
+        post_info = query_post(fid, pid)
+        if not forum_info or not post_info:
+            return bool_res()[False]
+        creater = forum_info[0][2]
+        creater_post = post_info[0][2]
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not (user_stat in ["admin", "root"] or uid == creater or uid == creater_post):
             return bool_res()[False]
@@ -452,11 +586,6 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
     @api("/forum/comment", methods=["POST"])
     def comment(req):
-        """
-        TODO
-
-        等到 TCP 模块写完，考虑写一个 @ 通知。
-        """
         uid = req["uid"]
         if not isinstance(uid, int):
             return bool_res()[False]
@@ -464,29 +593,41 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         fid = req["fid"]
         pid = req["pid"]
         comment : str = req["comment"]
-        user_stat = user_cursor.uid_query(uid)[0][4]
-        if user_stat == 'banned':
-            return bool_res()[False]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         user_stat = user_cursor.uid_query(uid)[0][4]
         if user_stat == 'banned':
             return bool_res()[False]
-        with locks['comments']:
-            with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
-                comments = json.load(file)
-            comments[str(fid)][str(pid)][str(time.time())] = [uid, comment]
-            with open("res/{}/forum/comments.json".format(port_api), "w+") as file:
-                json.dump(comments, file)
-        comment_space_split : str = comment.split(' ')
-        comment_at_split = comment_space_split.split('@')
-        for block in comment_at_split:
-            if '@' != block[0]:
-                continue
-            at_user = block[1:]
-            if not user_cursor.username_query(at_user):
-                continue 
-            # instant_contact.
+        comment_time = str(time.time())
+        def add_comment(comments):
+            thread = get_comment_thread(comments, fid, pid)
+            if thread is None:
+                return False
+            thread[comment_time] = [uid, comment]
+            return True
+
+        if not update_comments(port_api, add_comment):
+            return bool_res()[False]
+
+        def send_comment_notifications():
+            sender_name = user_cursor.uid_query(uid)[0][1]
+            forum_info = forum_cursor.query_forum_fid(fid)
+            post_info = forum_cursor.query_post_pid(fid, pid)
+            notified_uids = set()
+            forum_name = forum_info[0][1] if forum_info else str(fid)
+            post_title = post_info[0][1] if post_info else str(pid)
+            if post_info:
+                post_creater = post_info[0][2]
+                if post_creater != uid:
+                    notify_user(post_creater, "forum.comment.created", "你的帖子收到新评论", "{} 评论了你的帖子《{}》。".format(sender_name, post_title), sender=uid, meta={"fid" : fid, "pid" : pid, "comment_time" : comment_time})
+                    notified_uids.add(post_creater)
+            for mentioned_uid in extract_mentioned_uids(comment):
+                if mentioned_uid == uid or mentioned_uid in notified_uids:
+                    continue
+                notify_user(mentioned_uid, "forum.comment.mentioned", "你在评论中被提及", "{} 在论坛 {} 的评论中提到了你。".format(sender_name, forum_name), sender=uid, meta={"fid" : fid, "pid" : pid, "comment_time" : comment_time})
+                notified_uids.add(mentioned_uid)
+
+        run_notification_side_effect("forum.comment", send_comment_notifications)
 
         return bool_res()[True]
 
@@ -496,10 +637,11 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return {}
         fid = int(fid)
         pid = int(pid)
-        with locks['comments']:
-            with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
-                comments = json.load(file)
-        return comments[str(fid)][str(pid)]
+        comments = read_comments(port_api)
+        thread = get_comment_thread(comments, fid, pid)
+        if thread is None:
+            return {}
+        return thread
     
     @api("/forum/remove_comment", methods=['POST'])
     def remove_comment(req):
@@ -512,16 +654,20 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         fid = req["fid"]
         pid = req["pid"]
         time_stamp = req["send_time"]
-        with locks['comments']:
-            with open("res/{}/forum/comments.json".format(port_api), "r+") as file:
-                comments = json.load(file)
-            creater = comments[str(fid)][str(pid)][time_stamp][0]
-            user_stat = user_cursor.uid_query(uid)[0][4]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+
+        def remove_comment_entry(comments):
+            thread = get_comment_thread(comments, fid, pid)
+            if thread is None or time_stamp not in thread:
+                return False
+            creater = thread[time_stamp][0]
             if not (creater == uid or user_stat in ['admin', 'root']):
-                return bool_res()[False]
-            del comments[str(fid)][str(pid)][time_stamp]
-            with open("res/{}/forum/comments.json".format(port_api), "w+") as file:
-                json.dump(comments, file)
+                return False
+            del thread[time_stamp]
+            return True
+
+        if not update_comments(port_api, remove_comment_entry):
+            return bool_res()[False]
         return bool_res()[True]
 
     @app.route("/avatar/get_avatar/<typ>/<tid>")
@@ -545,7 +691,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         fid = req["fid"]
         pic_b64 = req["pic"]
         user_stat = user_cursor.uid_query(uid)[0][4]
-        creater = forum_cursor.query_forum_fid(fid)[0][2]
+        forum_info = query_forum(fid)
+        if not forum_info:
+            return bool_res()[False]
+        creater = forum_info[0][2]
         if uid == creater or user_stat in ['admin', 'root']:
             avatar.upload_avatar(port_api, fid, pic_b64, 'forum')
             return bool_res()[True]
@@ -589,10 +738,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         password = req["password"]
         filename = req["filename"]
         file_b64 = req["file_b64"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
         user_stat = user_cursor.uid_query(uid)[0][4]
         if user_stat == 'banned':
-            return bool_res()[False]
-        if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         with locks['config']:
             with open("res/{}/config.json".format(port_api), "r+") as f:
@@ -624,11 +773,6 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     
     @api("/announcement/upload_announcement", methods=['POST'])
     def upload_announcement(req):
-        """
-        TODO
-
-        发送公告提醒
-        """
         uid = req["uid"]
         password = req["password"]
         content = req["content"]
@@ -637,16 +781,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not user_stat in ['admin', 'root']:
             return bool_res()[False]
-        announcements.upload_announcement(port_api, uid, content, locks['announcement'])
+        time_stamp = announcements.upload_announcement(port_api, uid, content, locks['announcement'])
+        notify_users(all_user_ids(), "announcement.created", "收到新公告", content, sender=uid, meta={"time_stamp" : time_stamp})
         return bool_res()[True]
     
     @api("/announcement/edit_announcement", methods=['POST'])
     def edit_announcement(req):
-        """
-        TODO
-
-        发送公告提醒
-        """
         uid = req["uid"]
         password = req["password"]
         time_stamp = req["time_stamp"]
@@ -656,7 +796,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not user_stat in ['admin', 'root']:
             return bool_res()[False]
-        return bool_res()[announcements.edit_announcement(port_api, time_stamp, content, locks['announcement'])] 
+        succeeded = announcements.edit_announcement(port_api, time_stamp, content, locks['announcement'])
+        if succeeded:
+            notify_users(all_user_ids(), "announcement.edited", "公告已更新", content, sender=uid, meta={"time_stamp" : time_stamp})
+        return bool_res()[succeeded] 
     
     @api("/announcement/delete_announcement", methods=['POST'])
     def delete_announcement(req):
@@ -668,7 +811,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not user_stat in ['admin', 'root']:
             return bool_res()[False]
-        return bool_res()[announcements.delete_announcement(port_api, time_stamp, locks['announcement'])]
+        succeeded = announcements.delete_announcement(port_api, time_stamp, locks['announcement'])
+        if succeeded:
+            notify_users(all_user_ids(), "announcement.deleted", "公告已删除", "编号为 {} 的公告已被删除。".format(time_stamp), sender=uid, meta={"time_stamp" : time_stamp})
+        return bool_res()[succeeded]
     
     @app.route("/announcement/query_all")
     def query_all():
@@ -685,14 +831,14 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         password = req["password"]
         groupname = req["groupname"]
         introduction = req["introduction"]
-        user_stat = user_cursor.uid_query(uid)[0][4]
-        if user_stat == 'banned':
-            return bool_res()[False]
         if not "enter_hint" in req:
             enter_hint = ""
         else:
             enter_hint = req["enter_hint"]
         if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
             return bool_res()[False]
         return bool_res()[group_cursor.create_group(uid, groupname, enter_hint, introduction)]
     
@@ -720,7 +866,13 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         stat = group_cursor.is_admin(gid, uid)
         if stat != 2:
             return bool_res()[False]
-        return bool_res()[group_cursor.add_admin(gid, added)]
+        succeeded = group_cursor.add_admin(gid, added)
+        if succeeded:
+            run_notification_side_effect(
+                "group.admin.added",
+                lambda: notify_user(added, "group.admin.added", "你已成为群管理员", "你已成为群 {} 的管理员。".format(group_cursor.query_gid(gid)[0][2] if group_cursor.query_gid(gid) else str(gid)), sender=uid, meta={"gid" : gid})
+            )
+        return bool_res()[succeeded]
     
     # @api("/group/invite_member", methods=['POST'])
     # def invite_member(req):
@@ -737,9 +889,6 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
     @api("/group/remove_member", methods=['POST'])
     def remove_member(req):
-        """
-        TODO 踢出提醒
-        """
         uid = req["uid"]
         password = req["password"]
         gid = req["gid"]
@@ -750,13 +899,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         oped = group_cursor.is_admin(gid, removed)
         if not oper > oped:
             return bool_res()[False]
-        return bool_res()[group_cursor.remove_member(gid, removed)]
+        succeeded = group_cursor.remove_member(gid, removed)
+        if succeeded:
+            run_notification_side_effect(
+                "group.member.removed",
+                lambda: notify_user(removed, "group.member.removed", "你已被移出群聊", "你已被移出群 {}。".format(group_cursor.query_gid(gid)[0][2] if group_cursor.query_gid(gid) else str(gid)), sender=uid, meta={"gid" : gid})
+            )
+        return bool_res()[succeeded]
     
     @api("/group/remove_admin", methods=['POST'])
     def remove_admin(req):
-        """
-        TODO 移除权限提醒 
-        """
         uid = req["uid"]
         password = req["password"]
         gid = req["gid"]
@@ -765,13 +917,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         if not group_cursor.is_admin(gid, uid) == 2:
             return bool_res()[False]
-        return bool_res()[group_cursor.remove_admin(gid, removed)]
+        succeeded = group_cursor.remove_admin(gid, removed)
+        if succeeded:
+            run_notification_side_effect(
+                "group.admin.removed",
+                lambda: notify_user(removed, "group.admin.removed", "你的管理员权限已被移除", "你在群 {} 的管理员权限已被移除。".format(group_cursor.query_gid(gid)[0][2] if group_cursor.query_gid(gid) else str(gid)), sender=uid, meta={"gid" : gid})
+            )
+        return bool_res()[succeeded]
 
     @api("/group/delete_group", methods=['POST'])
     def delete_group(req):
-        """
-        TODO TEST
-        """
         uid = req["uid"]
         password = req["password"]
         gid = req["gid"]
@@ -779,7 +934,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         if not group_cursor.is_admin(gid, uid) == 2:
             return bool_res()[False]
+        group_info = group_cursor.query_gid(gid)
+        if group_info:
+            group_info = group_info[0]
+            group_name = group_info[2]
+            target_uids = json.loads(group_info[3]) + json.loads(group_info[4]) + [group_info[1]]
+        else:
+            group_name = str(gid)
+            target_uids = []
         group_cursor.delete_group(gid)
+        notify_users([target_uid for target_uid in target_uids if target_uid != uid], "group.deleted", "群聊已解散", "群 {} 已被解散。".format(group_name), sender=uid, meta={"gid" : gid})
         return bool_res()[True]
     
     @api("/friend/add_friend", methods=['POST'])

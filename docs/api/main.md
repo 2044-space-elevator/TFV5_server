@@ -10,6 +10,13 @@
 
 **请不要频繁访问 API，遵循服主要求。**
 
+## 文档目录
+
+- [auth.md](auth.md) 账号相关 API
+- [forum.md](forum.md) 论坛相关 API
+- [info.md](info.md) 服务器信息 API
+- [notification.md](notification.md) 通知系统与实时推送 API
+
 ## 文档约定
 
 约定 1：secret 类型的 API 条目前面**不加**星号，public 类型的 API 条目前面**加**星号。

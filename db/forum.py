@@ -1,6 +1,40 @@
 from db.tool import Db
 from time import time
 import json
+import threading
+
+
+_comments_locks = {}
+_comments_locks_lock = threading.Lock()
+
+
+def comments_path(port_api : int):
+    return "res/{}/forum/comments.json".format(port_api)
+
+
+def get_comments_lock(port_api : int):
+    with _comments_locks_lock:
+        lock = _comments_locks.get(port_api)
+        if lock is None:
+            lock = threading.Lock()
+            _comments_locks[port_api] = lock
+        return lock
+
+
+def read_comments(port_api : int):
+    with get_comments_lock(port_api):
+        with open(comments_path(port_api), "r", encoding="utf-8") as file:
+            return json.load(file)
+
+
+def update_comments(port_api : int, callback):
+    with get_comments_lock(port_api):
+        with open(comments_path(port_api), "r+", encoding="utf-8") as file:
+            comments = json.load(file)
+        result = callback(comments)
+        with open(comments_path(port_api), "w+", encoding="utf-8") as file:
+            json.dump(comments, file)
+        return result
 
 class ForumDb(Db):
     def __init__(self, path : str, port_api : int, port_tcp : int):
@@ -27,12 +61,6 @@ class ForumDb(Db):
         :param creater: 创建者（uid）
         :param introduction: 论坛简介
         """
-        fid = self.query("SELECT MAX(fid) from forums")[0][0]
-        if fid == None:
-            fid = 0
-        else:
-            fid += 1
-        
         cmd = """
     CREATE TABLE IF NOT EXISTS F{} (
         pid INTEGER UNIQUE NOT NULL,
@@ -42,13 +70,27 @@ class ForumDb(Db):
         send_time TEXT REAL
     )  
     """
-        self.execute("INSERT INTO forums (fid, forumname, creater, create_time, introduction, post_num) VALUES (?, ?, ?, ?, ?, 0)", (fid, forumname, creater, time(), introduction))
-        self.execute(cmd.format(fid))
-        with open("res/{}/forum/comments.json".format(self.api_pt), "r+") as file:
-            comments = json.load(file)
-        comments[fid] = {}
-        with open("res/{}/forum/comments.json".format(self.api_pt), "w+") as file:
-            json.dump(comments, file)
+
+        def insert_forum():
+            self.cursor.execute("SELECT MAX(fid) from forums")
+            fid = self.cursor.fetchone()[0]
+            if fid == None:
+                fid = 0
+            else:
+                fid += 1
+            self.cursor.execute(
+                "INSERT INTO forums (fid, forumname, creater, create_time, introduction, post_num) VALUES (?, ?, ?, ?, ?, 0)",
+                (fid, forumname, creater, time(), introduction)
+            )
+            self.cursor.execute(cmd.format(fid))
+            self.conn.commit()
+            return fid
+
+        with self.lock:
+            fid = self._execute_with_retry(insert_forum)
+
+        update_comments(self.api_pt, lambda comments: comments.setdefault(str(fid), {}))
+        return fid
     
     def query_forum_fid(self, fid):
         return self.query("SELECT * FROM forums WHERE fid = ?", (fid,))
@@ -80,33 +122,46 @@ class ForumDb(Db):
     def send_post(self, fid : int, sender : int, title : str, content : str):
         if len(title) > 30:
             return False
-        pid = self.query("SELECT MAX(pid) from F{}".format(fid))[0][0]
-        if pid == None:
-            pid = 0
-        else:
-            pid += 1
-        self.execute("INSERT INTO F{} (pid, title, creater, content, send_time) VALUES (?, ?, ?, ?, ?)".format(fid), (pid, title, sender, content, time()))
-        self.execute("UPDATE forums set post_num = post_num + 1 where fid = ?", (fid,))
-        with open("res/{}/forum/comments.json".format(self.api_pt), "r+") as file:
-            comments = json.load(file)
-        comments[str(fid)][str(pid)] = {}
-        with open("res/{}/forum/comments.json".format(self.api_pt), "w+") as file:
-            json.dump(comments, file)
+        def insert_post():
+            self.cursor.execute("SELECT MAX(pid) from F{}".format(fid))
+            pid = self.cursor.fetchone()[0]
+            if pid == None:
+                pid = 0
+            else:
+                pid += 1
+            self.cursor.execute(
+                "INSERT INTO F{} (pid, title, creater, content, send_time) VALUES (?, ?, ?, ?, ?)".format(fid),
+                (pid, title, sender, content, time())
+            )
+            self.cursor.execute("UPDATE forums set post_num = post_num + 1 where fid = ?", (fid,))
+            self.conn.commit()
+            return pid
+
+        with self.lock:
+            pid = self._execute_with_retry(insert_post)
+
+        def add_post_bucket(comments):
+            comments.setdefault(str(fid), {})[str(pid)] = {}
+
+        update_comments(self.api_pt, add_post_bucket)
         return True
     
     def delete_forum(self, fid : int):
         self.execute("DELETE FROM forums WHERE fid = ?", (fid, ))
         self.execute("DROP TABLE IF EXISTS F{}".format(fid))
-        with open("res/{}/forum/comments.json".format(self.api_pt), "r+") as file:
-            comments = json.load(file)
-        del comments[str(fid)]
-        with open("res/{}/forum/comments.json".format(self.api_pt), "w+") as file:
-            json.dump(comments, file)
+        update_comments(self.api_pt, lambda comments: comments.pop(str(fid), None))
 
     def delete_post(self, fid : int, pid : int):
+        if not self.query_post_pid(fid, pid):
+            return
         self.execute("DELETE FROM F{} where pid = ?".format(fid), (pid,))
-        with open("res/{}/forum/comments.json".format(self.api_pt), "r+") as file:
-            comments = json.load(file)
-        del comments[str(fid)][str(pid)]
-        with open("res/{}/forum/comments.json".format(self.api_pt), "w+") as file:
-            json.dump(comments, file)
+        self.execute(
+            "UPDATE forums set post_num = CASE WHEN post_num > 0 THEN post_num - 1 ELSE 0 END where fid = ?",
+            (fid,)
+        )
+        def remove_post_bucket(comments):
+            forum_comments = comments.get(str(fid))
+            if isinstance(forum_comments, dict):
+                forum_comments.pop(str(pid), None)
+
+        update_comments(self.api_pt, remove_post_bucket)
