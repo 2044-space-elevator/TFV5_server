@@ -59,6 +59,21 @@
 
 `<qid>` 是队列中的请求 id，获取方法见上。
 
+- `^ POST /forum/reject_forum` 拒绝论坛。
+
+论坛审核拒绝后，论坛创建者会收到一条通知。
+
+请求体：
+
+```
+{
+    "qid" : <qid>,
+    "reason" : <reason>
+}
+```
+
+其中 `<qid>` 是队列中的请求 id，`<reason>` 是可选的拒绝原因。
+
 - `* GET /forum/get_forum_list` 获取所有论坛
 
 返回体：

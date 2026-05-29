@@ -509,10 +509,38 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             fchosen = queue[str(qid)]
             fid = forum_cursor.create_forum(fchosen["forumname"], fchosen["creater"], fchosen["introduction"]) 
             del queue[str(qid)]
-            queue["queue_num"] -= 1
+            queue["queue_num"] = max(queue["queue_num"] - 1, 0)
             with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
                 json.dump(queue, file)
         notify_user(fchosen["creater"], "forum.approved", "论坛已通过审核", "你创建的论坛 {} 已通过审核。".format(fchosen["forumname"]), sender=uid, meta={"fid" : fid, "forum_name" : fchosen["forumname"]})
+        return bool_res()[True]
+
+    @api("/forum/reject_forum", methods=["POST"])
+    def reject_forum(req):
+        uid = req["uid"]
+        password = req["password"]
+        qid = req["qid"]
+        reason = req.get("reason")
+        if not isinstance(reason, str):
+            reason = ""
+        reason = reason.strip()
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if not user_stat in ["admin", "root"]:
+            return bool_res()[False]
+        with locks['queue']:
+            with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
+                queue = json.load(file)
+            if str(qid) not in queue:
+                return bool_res()[False]
+            fchosen = queue[str(qid)]
+            del queue[str(qid)]
+            queue["queue_num"] = max(queue["queue_num"] - 1, 0)
+            with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
+                json.dump(queue, file)
+        reason_suffix = "原因：{}".format(reason) if reason else ""
+        notify_user(fchosen["creater"], "forum.rejected", "论坛未通过审核", "你创建的论坛 {} 未通过审核。{}".format(fchosen["forumname"], reason_suffix), sender=uid, meta={"qid" : qid, "forum_name" : fchosen["forumname"], "reason" : reason})
         return bool_res()[True]
 
     @app.route("/forum/get_forum_list")

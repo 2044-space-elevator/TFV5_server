@@ -39,6 +39,7 @@ TFV5 的通知系统由两部分组成：
 
 - `auth.stat.changed`
 - `forum.approved`
+- `forum.rejected`
 - `forum.comment.created`
 - `forum.comment.mentioned`
 - `announcement.created`
