@@ -165,3 +165,68 @@ class ForumDb(Db):
                 forum_comments.pop(str(pid), None)
 
         update_comments(self.api_pt, remove_post_bucket)
+
+    def clean_user_content(self, uid : int):
+        uid = int(uid)
+        with self.lock:
+            def operation():
+                self.cursor.execute("SELECT fid FROM forums WHERE creater = ?", (uid,))
+                deleted_forums = [row[0] for row in self.cursor.fetchall()]
+
+                for fid in deleted_forums:
+                    self.cursor.execute("DELETE FROM forums WHERE fid = ?", (fid,))
+                    self.cursor.execute("DROP TABLE IF EXISTS F{}".format(fid))
+
+                self.cursor.execute("SELECT fid FROM forums")
+                remaining_forums = [row[0] for row in self.cursor.fetchall()]
+                deleted_posts = {}
+
+                for fid in remaining_forums:
+                    self.cursor.execute("SELECT pid FROM F{} WHERE creater = ?".format(fid), (uid,))
+                    post_ids = [row[0] for row in self.cursor.fetchall()]
+                    if not post_ids:
+                        continue
+
+                    deleted_posts[fid] = post_ids
+                    self.cursor.execute("DELETE FROM F{} WHERE creater = ?".format(fid), (uid,))
+                    self.cursor.execute(
+                        "UPDATE forums SET post_num = CASE WHEN post_num >= ? THEN post_num - ? ELSE 0 END WHERE fid = ?",
+                        (len(post_ids), len(post_ids), fid),
+                    )
+
+                self.conn.commit()
+                return deleted_forums, deleted_posts
+
+            deleted_forums, deleted_posts = self._execute_with_retry(operation)
+
+        deleted_posts_text = {
+            str(fid): {str(pid) for pid in post_ids}
+            for fid, post_ids in deleted_posts.items()
+        }
+
+        def clean_comments(comments):
+            for fid in deleted_forums:
+                comments.pop(str(fid), None)
+
+            for fid, forum_comments in list(comments.items()):
+                if not isinstance(forum_comments, dict):
+                    continue
+
+                removed_posts = deleted_posts_text.get(fid, set())
+                for pid in list(forum_comments.keys()):
+                    if pid in removed_posts:
+                        forum_comments.pop(pid, None)
+                        continue
+
+                    thread = forum_comments.get(pid)
+                    if not isinstance(thread, dict):
+                        continue
+
+                    for time_stamp, entry in list(thread.items()):
+                        if isinstance(entry, list) and entry and entry[0] == uid:
+                            del thread[time_stamp]
+
+            return True
+
+        update_comments(self.api_pt, clean_comments)
+        return True

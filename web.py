@@ -25,6 +25,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     app = Flask(__name__)
     api = return_app_route(app, pri)
     limiter = RateLimiter(port_api)
+    manager_auths = {"admin", "root"}
+    managed_auths = {"user", "banned", "admin", "root"}
     locks = {
         'config': threading.Lock(),
         'activate': threading.Lock(),
@@ -42,12 +44,23 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             "meta" : meta or {}
         }
 
-    def run_notification_side_effect(action : str, callback):
+    def run_side_effect(action : str, callback):
         try:
             return callback()
         except Exception as e:
-            print("[WARN] 通知流程失败({}): {}".format(action, e))
+            print("[WARN] 副作用失败({}): {}".format(action, e))
             return None
+
+    def run_notification_side_effect(action : str, callback):
+        return run_side_effect("notification/{}".format(action), callback)
+
+    def ensure_notification_table(target_uid : int):
+        try:
+            notification_cursor.create_user_table(target_uid)
+            return True
+        except Exception as e:
+            print("[WARN] 创建通知表失败(uid={}): {}".format(target_uid, e))
+            return False
 
     def notify_user(target_uid : int, event : str, title : str, content : str, sender=None, meta=None):
         def callback():
@@ -115,6 +128,114 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
     def serialize_notifications(rows):
         return json.dumps(notification_cursor.serialize_rows(rows), ensure_ascii=False)
+
+    def get_user_row(uid):
+        info = user_cursor.uid_query(uid)
+        if not info:
+            return None
+        return info[0]
+
+    def verify_manager(uid, pwd):
+        if not user_cursor.verify_user(uid, pwd):
+            return None
+        operator = get_user_row(uid)
+        if operator is None:
+            return None
+        if operator[4] not in manager_auths:
+            return None
+        return operator
+
+    def can_manage_auth(operator_auth : str, target_auth : str):
+        if operator_auth == "root":
+            return target_auth in managed_auths
+        if operator_auth == "admin":
+            return target_auth in {"user", "banned"}
+        return False
+
+    def resolve_managed_target(operator_auth : str, target_uid : int, next_auth=None, deleting=False):
+        target = get_user_row(target_uid)
+        if target is None:
+            return None
+
+        target_auth = target[4]
+        if not can_manage_auth(operator_auth, target_auth):
+            return None
+        if next_auth is not None and not can_manage_auth(operator_auth, next_auth):
+            return None
+        return target
+
+    def collect_managed_updates(req):
+        updates = {}
+        if "username" in req:
+            updates["username"] = req["username"]
+        if "target_password" in req:
+            updates["password"] = req["target_password"]
+        if "email" in req:
+            updates["email"] = req["email"]
+        if "new_auth" in req:
+            updates["stat"] = req["new_auth"]
+        if "sign" in req:
+            updates["sign"] = req["sign"]
+        if "introduction" in req:
+            updates["introduction"] = req["introduction"]
+        return updates
+
+    def cleanup_forum_queue(target_uid : int):
+        target_uid = int(target_uid)
+        with locks['queue']:
+            with open("res/{}/forum/queue.json".format(port_api), "r+", encoding="utf-8") as file:
+                queue = json.load(file)
+
+            removed_keys = [
+                key
+                for key, value in queue.items()
+                if key.isdigit() and isinstance(value, dict) and value.get("creater") == target_uid
+            ]
+
+            if not removed_keys:
+                return True
+
+            for key in removed_keys:
+                del queue[key]
+
+            queue["queue_num"] = max(queue.get("queue_num", 0) - len(removed_keys), 0)
+
+            with open("res/{}/forum/queue.json".format(port_api), "w+", encoding="utf-8") as file:
+                json.dump(queue, file)
+
+        return True
+
+    def clean_deleted_user_state(target_uid : int):
+        target_uid = int(target_uid)
+        deleted_group_ids = [row[0] for row in group_cursor.query_creater(target_uid)]
+        deleted_forum_ids = [row[0] for row in forum_cursor.query_forum_creater(target_uid)]
+
+        avatar.clean_avatar(port_api, target_uid, "user")
+        for gid in deleted_group_ids:
+            avatar.clean_avatar(port_api, gid, "group")
+        for fid in deleted_forum_ids:
+            avatar.clean_avatar(port_api, fid, "forum")
+
+        file.clean_user_files(port_api, target_uid, file_cursor)
+        group_cursor.clean_user_membership(target_uid)
+        forum_cursor.clean_user_content(target_uid)
+        cleanup_forum_queue(target_uid)
+        return True
+
+    def perform_managed_auth_change(uid : int, pwd : str, target_uid : int, new_auth : str):
+        operator = verify_manager(uid, pwd)
+        if operator is None:
+            return False
+
+        target = resolve_managed_target(operator[4], target_uid, next_auth=new_auth)
+        if target is None:
+            return False
+
+        if not user_cursor.update_user_with_root_guard(target_uid, stat=new_auth):
+            return False
+
+        notify_user(target_uid, "auth.stat.changed", "账号状态已变更", "你的账号状态已更新为 {}。".format(new_auth), sender=uid, meta={"new_auth" : new_auth})
+        return True
     
     @app.before_request
     def check_rate_limit():
@@ -263,9 +384,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         succeeded = user_cursor.user_create(username, password, time.time(), email)
         if not succeeded:
             return bool_res()[False]
+        target_uid = user_cursor.username_query(username)[0][0]
         if is_email_activate and succeeded:
-            user_cursor.change_auth(user_cursor.username_query(username)[0][0], "banned")
-        notification_cursor.create_user_table(user_cursor.username_query(username)[0][0])
+            user_cursor.change_auth(target_uid, "banned")
+        if not ensure_notification_table(target_uid):
+            user_cursor.delete_user(target_uid)
+            return bool_res()[False]
         return bool_res()[True]
 
     @api("/auth/activate", methods=["POST"])
@@ -290,29 +414,123 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             pwd = req["password"]
             oped = req["change_uid"]
             new_auth = req["new_auth"]
-            if not new_auth in ["user", "banned", "admin"]:
+            return bool_res()[perform_managed_auth_change(uid, pwd, oped, new_auth)]
+        except:
+            return bool_res()[False]
+
+    @api("/auth/manage/create", methods=["POST"])
+    def manage_create_user(req):
+        try:
+            uid = req["uid"]
+            pwd = req["password"]
+            username = req["username"]
+            target_password = req["target_password"]
+            new_auth = req.get("new_auth", "user")
+            email = req["email"] if "email" in req else None
+
+            operator = verify_manager(uid, pwd)
+            if operator is None:
+                return bool_res()[False]
+            if not can_manage_auth(operator[4], new_auth):
                 return bool_res()[False]
 
-            if not user_cursor.verify_user(uid, pwd):
+            if not user_cursor.user_create(username, target_password, time.time(), email, stat=new_auth):
                 return bool_res()[False]
 
-            op_auth = user_cursor.uid_query(uid)[0][4]
-            oped_auth = user_cursor.uid_query(oped)[0][4]
-            if op_auth == 'user' or op_auth == 'banned':
+            target = user_cursor.username_query(username)
+            if not target:
                 return bool_res()[False]
-            
-            if op_auth == "admin":
-                if oped_auth == "admin" or oped_auth == "root":
-                    return bool_res()[False]
-                if new_auth == "admin":
-                    return bool_res()[False]
-            
-            if op_auth == "root":
-                if oped_auth == "root":
-                    return bool_res()[False]
-            
-            user_cursor.change_auth(oped, new_auth)
-            notify_user(oped, "auth.stat.changed", "账号状态已变更", "你的账号状态已更新为 {}。".format(new_auth), sender=uid, meta={"new_auth" : new_auth})
+
+            target_uid = target[0][0]
+            extra_updates = {}
+            if "sign" in req:
+                extra_updates["sign"] = req["sign"]
+            if "introduction" in req:
+                extra_updates["introduction"] = req["introduction"]
+
+            if extra_updates and not user_cursor.update_user(target_uid, **extra_updates):
+                user_cursor.delete_user(target_uid)
+                return bool_res()[False]
+
+            if not ensure_notification_table(target_uid):
+                user_cursor.delete_user(target_uid)
+                return bool_res()[False]
+            return bool_res()[True]
+        except:
+            return bool_res()[False]
+
+    @api("/auth/manage/update", methods=["POST"])
+    def manage_update_user(req):
+        try:
+            uid = req["uid"]
+            pwd = req["password"]
+            target_uid = req["change_uid"]
+            next_auth = req["new_auth"] if "new_auth" in req else None
+
+            operator = verify_manager(uid, pwd)
+            if operator is None:
+                return bool_res()[False]
+
+            target = resolve_managed_target(operator[4], target_uid, next_auth=next_auth)
+            if target is None:
+                return bool_res()[False]
+
+            updates = collect_managed_updates(req)
+            if not updates:
+                return bool_res()[False]
+
+            if not user_cursor.update_user_with_root_guard(target_uid, **updates):
+                return bool_res()[False]
+
+            if "new_auth" in req:
+                notify_user(target_uid, "auth.stat.changed", "账号状态已变更", "你的账号状态已更新为 {}。".format(req["new_auth"]), sender=uid, meta={"new_auth" : req["new_auth"]})
+            return bool_res()[True]
+        except:
+            return bool_res()[False]
+
+    @api("/auth/manage/ban", methods=["POST"])
+    def manage_ban_user(req):
+        try:
+            uid = req["uid"]
+            pwd = req["password"]
+            target_uid = req["change_uid"]
+            return bool_res()[perform_managed_auth_change(uid, pwd, target_uid, "banned")]
+        except:
+            return bool_res()[False]
+
+    @api("/auth/manage/delete", methods=["POST"])
+    def manage_delete_user(req):
+        try:
+            uid = req["uid"]
+            pwd = req["password"]
+            target_uid = int(req["change_uid"])
+
+            operator = verify_manager(uid, pwd)
+            if operator is None:
+                return bool_res()[False]
+
+            target = resolve_managed_target(operator[4], target_uid, deleting=True)
+            if target is None:
+                return bool_res()[False]
+
+            if target[4] == "root" and user_cursor.count_users_with_stat("root") <= 1:
+                return bool_res()[False]
+
+            if not user_cursor.delete_user_with_root_guard(target_uid):
+                return bool_res()[False]
+
+            run_side_effect(
+                "disconnect_deleted_user",
+                lambda: instant_contact.disconnect_user(target_uid)
+            )
+            run_side_effect(
+                "clean_deleted_user_state",
+                lambda: clean_deleted_user_state(target_uid)
+            )
+            run_side_effect(
+                "delete_user_notification_table",
+                lambda: notification_cursor.delete_user_table(target_uid)
+            )
             return bool_res()[True]
         except:
             return bool_res()[False]
@@ -588,6 +806,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         creater = forum_info[0][2]
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not (user_stat in ["admin", "root"] or uid == creater):
+            return bool_res()[False]
+        try:
+            avatar.clean_avatar(port_api, fid, "forum")
+        except Exception:
             return bool_res()[False]
         forum_cursor.delete_forum(fid)
         return bool_res()[True]
@@ -970,6 +1192,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         else:
             group_name = str(gid)
             target_uids = []
+        try:
+            avatar.clean_avatar(port_api, gid, "group")
+        except Exception:
+            return bool_res()[False]
         group_cursor.delete_group(gid)
         notify_users([target_uid for target_uid in target_uids if target_uid != uid], "group.deleted", "群聊已解散", "群 {} 已被解散。".format(group_name), sender=uid, meta={"gid" : gid})
         return bool_res()[True]

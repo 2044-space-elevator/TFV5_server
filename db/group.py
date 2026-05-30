@@ -126,3 +126,41 @@ class GroupDb(Db):
     def delete_group(self, gid : int):
         self.execute("DROP TABLE IF EXISTS G{}".format(gid))
         self.execute("DELETE FROM groups WHERE gid = ?", (gid,))
+
+    def remove_user_membership(self, uid : int):
+        uid = int(uid)
+        with self.lock:
+            def operation():
+                self.cursor.execute("SELECT gid, creater, members, admins FROM groups")
+                groups = self.cursor.fetchall()
+                deleted_gids = []
+
+                for gid, creater, members_raw, admins_raw in groups:
+                    if creater == uid:
+                        self.cursor.execute("DROP TABLE IF EXISTS G{}".format(gid))
+                        self.cursor.execute("DELETE FROM groups WHERE gid = ?", (gid,))
+                        deleted_gids.append(gid)
+                        continue
+
+                    members = json.loads(members_raw)
+                    admins = json.loads(admins_raw)
+                    changed = False
+
+                    if uid in members:
+                        members = [member for member in members if member != uid]
+                        changed = True
+
+                    if uid in admins:
+                        admins = [admin for admin in admins if admin != uid]
+                        changed = True
+
+                    if changed:
+                        self.cursor.execute(
+                            "UPDATE groups SET members = ?, admins = ? WHERE gid = ?",
+                            (str(members), str(admins), gid),
+                        )
+
+                self.conn.commit()
+                return deleted_gids
+
+            return self._execute_with_retry(operation)

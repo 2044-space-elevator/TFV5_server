@@ -67,9 +67,106 @@
 }
 ```
 
-其中 `<uid>` 是被操作者的用户编号，`<new_auth>` 是用户的新状态（身份），有：`admin, banned, user`，其中只有 `root` 权限用户才可将用户状态更为 `admin`，只有 `root` 权限才可改变非 `root` 权限用户的权限到 `admin` ，`admin` 和 `root` 权限可改变 `user` 权限用户到 `banned`。
+其中 `<uid>` 是被操作者的用户编号，`<new_auth>` 是用户的新状态（身份），有：`root, admin, banned, user`。
+
+权限约束如下：
+
+- `root` 可操作所有账号，也可把账号状态修改为 `root`
+- `admin` 只能操作 `user` 与 `banned` 账号，且只能把它们改成 `user` 或 `banned`
+- `root` 账号只有 `root` 能修改
+- 服务端必须始终至少保留一个 `root`；最后一个 `root` 不能被降级，也不能被删除
 
 返回体：若更改成功，返回时间戳加 `True`。若无权限或更改失败，返回时间戳加 `False`。
+
+## 管理接口
+
+以下接口要求操作者至少拥有 `admin` 权限。
+
+统一约束：
+
+- `root` 可操作所有账号
+- `admin` 只能操作 `user` 与 `banned`
+- `root` 账号仅允许 `root` 修改或删除
+- 服务端必须至少保留一个 `root`
+
+- `^ POST /auth/manage/create`
+
+请求体：
+
+```
+{
+    "uid" : <operator_uid>,
+    "password" : <operator_password>,
+    "username" : <username>,
+    "target_password" : <target_password>,
+    "email" : <email>,
+    "new_auth" : <user_stat>,
+    "sign" : <sign>,
+    "introduction" : <introduction>
+}
+```
+
+其中 `uid/password` 是操作者的凭据，`target_password` 是新建账号的密码。`new_auth` 可省略，默认值为 `user`。
+
+权限约束与上文一致：`root` 可创建任意权限账号，`admin` 只能创建 `user` 或 `banned`。
+
+返回体：若创建成功，返回时间戳加 `True`，否则返回时间戳加 `False`。
+
+- `^ POST /auth/manage/update`
+
+请求体：
+
+```
+{
+    "uid" : <operator_uid>,
+    "password" : <operator_password>,
+    "change_uid" : <target_uid>,
+    "username" : <username>,
+    "target_password" : <target_password>,
+    "email" : <email>,
+    "new_auth" : <user_stat>,
+    "sign" : <sign>,
+    "introduction" : <introduction>
+}
+```
+
+除 `uid/password/change_uid` 外，其余字段均为可选；仅会更新请求体里显式提供的字段。
+
+权限约束与 `/auth/change_auth` 一致。若要清空邮箱，可将 `email` 设为 `null` 或空字符串。
+
+返回体：若更新成功，返回时间戳加 `True`，否则返回时间戳加 `False`。
+
+- `^ POST /auth/manage/ban`
+
+请求体：
+
+```
+{
+    "uid" : <operator_uid>,
+    "password" : <operator_password>,
+    "change_uid" : <target_uid>
+}
+```
+
+该接口等价于把目标账号状态直接改为 `banned`。`root` 可封禁任意账号，`admin` 只能封禁 `user` 或 `banned` 账号。
+
+返回体：若封禁成功，返回时间戳加 `True`，否则返回时间戳加 `False`。
+
+- `^ POST /auth/manage/delete`
+
+请求体：
+
+```
+{
+    "uid" : <operator_uid>,
+    "password" : <operator_password>,
+    "change_uid" : <target_uid>
+}
+```
+
+`root` 可删除任意账号，但最后一个 `root` 不可删除；`admin` 只能删除 `user` 或 `banned` 账号。
+
+返回体：若删除成功，返回时间戳加 `True`，否则返回时间戳加 `False`。
 
 - `^ POST /auth/change_captcha` 改变是否要开启图片验证码注册
 
