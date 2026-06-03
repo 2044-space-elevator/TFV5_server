@@ -101,7 +101,8 @@ class GroupDb(Db):
         with open("res/{}/config.json".format(self.api_pt), "r+") as file:
             cfg = json.load(file)
         created_by = self.query_creater(creater)
-        if len(created_by) >= cfg["groups_limit"]:
+        groups_limit = cfg.get("groups_limit", 30)
+        if groups_limit != -1 and len(created_by) >= groups_limit:
             return False
         gid = self.query("SELECT MAX(gid) from groups")[0][0]
         if gid == None:
@@ -118,6 +119,11 @@ class GroupDb(Db):
             return False
         members = json.loads(members[0][3])
         if new_memeber in members:
+            return False
+        with open("res/{}/config.json".format(self.api_pt), "r+") as file:
+            cfg = json.load(file)
+        single_group_max_people = cfg.get("single_group_max_people", 200)
+        if single_group_max_people != -1 and len(members) >= single_group_max_people:
             return False
         members.append(new_memeber)
         self.execute("UPDATE groups SET members = ? WHERE gid = ?", (str(members), gid))

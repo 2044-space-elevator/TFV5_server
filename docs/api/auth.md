@@ -168,6 +168,136 @@
 
 返回体：若删除成功，返回时间戳加 `True`，否则返回时间戳加 `False`。
 
+- `^ POST /auth/manage/list`
+
+请求体：
+
+```
+{
+    "uid" : <operator_uid>,
+    "password" : <operator_password>,
+    "page" : <page>,
+    "page_size" : <page_size>,
+    "fetch_all" : <fetch_all>
+}
+```
+
+其中 `page` 和 `page_size` 用于分页查询，默认分别为 `1` `50`；`page_size` 最大为 `500`。如果 `fetch_all=true` 或 `page_size=-1`，则一次性返回全部用户。
+
+返回体：
+
+```
+{
+    "users" : [
+        {
+            "uid" : <uid>,
+            "username" : <username>,
+            "email" : <email>,
+            "stat" : <stat>,
+            "create_time" : <create_time>,
+            "personal_sign" : <personal_sign>,
+            "introduction" : <introduction>
+        }
+    ],
+    "pagination" : {
+        "page" : <page>,
+        "page_size" : <page_size>,
+        "total" : <total>,
+        "total_pages" : <total_pages>,
+        "has_more" : <has_more>
+    },
+    "fetch_all" : <fetch_all>
+}
+```
+
+该接口要求操作者至少拥有 `admin` 权限。
+
+## 服务配置接口
+
+以下接口要求操作者必须拥有 `root` 权限。
+
+- `^ POST /auth/server_settings/query`
+
+请求体：
+
+```
+{
+    "uid" : <root_uid>,
+    "password" : <root_password>
+}
+```
+
+返回体：
+
+```
+{
+    "server_name" : <server_name>,
+    "port_api" : <port_api>,
+    "port_tcp" : <port_tcp>,
+    "captcha" : <captcha>,
+    "file_last_time" : <file_last_time>,
+    "groups_limit" : <groups_limit>,
+    "single_group_max_people" : <single_group_max_people>,
+    "max_file_size" : <max_file_size>,
+    "email_activate" : <email_activate>,
+    "verify_email" : <verify_email>,
+    "rate_limits" : <rate_limits>,
+    "default_asset_urls" : {
+        "logo" : "/avatar/get_logo",
+        "forum" : "/avatar/get_default/forum",
+        "user" : "/avatar/get_default/user",
+        "group" : "/avatar/get_default/group"
+    }
+}
+```
+
+其中 `verify_email` 仅在已启用邮箱验证时返回。
+
+- `^ POST /auth/server_settings/update`
+
+请求体：
+
+```
+{
+    "uid" : <root_uid>,
+    "password" : <root_password>,
+    "server_name" : <server_name>,
+    "captcha" : <captcha>,
+    "file_last_time" : <file_last_time>,
+    "groups_limit" : <groups_limit>,
+    "single_group_max_people" : <single_group_max_people>,
+    "max_file_size" : <max_file_size>
+}
+```
+
+以上字段均为可选，接口只会更新请求体中显式传入的字段。
+
+约束：
+
+- `server_name` 必须是非空字符串
+- `file_last_time` 必须是大于等于 `0` 的整数
+- `groups_limit`、`single_group_max_people`、`max_file_size` 支持传入 `-1` 表示不限制
+
+返回体与 `/auth/server_settings/query` 相同。
+
+- `^ POST /avatar/upload_default_avatar`
+
+请求体：
+
+```
+{
+    "uid" : <operator_uid>,
+    "password" : <operator_password>,
+    "type" : <asset_type>,
+    "pic" : <base64_png>
+}
+```
+
+其中 `<asset_type>` 允许为 `logo`、`forum`、`user`、`group`。
+`<base64_png>` 需要是 PNG 图片的 Base64 编码内容。
+
+该接口要求操作者至少拥有 `admin` 权限。
+
 - `^ POST /auth/change_captcha` 改变是否要开启图片验证码注册
 
 请求体：

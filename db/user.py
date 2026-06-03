@@ -182,6 +182,18 @@ class UserDb(Db):
             return 0
         return ret[0][0]
 
+    def count_users(self):
+        ret = self.query("SELECT COUNT(*) FROM users")
+        if not ret:
+            return 0
+        return ret[0][0]
+
+    def list_users(self, limit=None, offset : int = 0):
+        command = "SELECT uid, username, email, stat, create_time, sign, introduction FROM users ORDER BY uid ASC"
+        if limit is None:
+            return self.query(command)
+        return self.query(command + " LIMIT ? OFFSET ?", (int(limit), int(offset)))
+
     def validate_email(self, email : str, current_uid=None):
         if not re.fullmatch(email_regex, email):
             return False

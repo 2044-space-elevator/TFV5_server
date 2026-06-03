@@ -18,23 +18,27 @@ def init(port_api : int):
     
     if not path.exists("res/{}/avatar/user".format(port_api)):
         makedirs("res/{}/avatar/user".format(port_api))
-        
-    with open("res/{}/avatar/forum.png".format(port_api), "wb") as file:
-        file.write(base64.b64decode(FORUM_B64))
-    
-    with open("res/{}/avatar/user.png".format(port_api), "wb") as file:
-        file.write(base64.b64decode(USER_B64))
-    
-    with open("res/{}/avatar/group.png".format(port_api), "wb") as file:
-        file.write(base64.b64decode(GROUP_B64))
-    
-    with open("res/{}/avatar/logo.png".format(port_api), "wb") as file:
-        file.write(base64.b64decode(LOGO_B64))
+
+    _ensure_default_asset(default_avatar_path(port_api, "forum"), FORUM_B64)
+    _ensure_default_asset(default_avatar_path(port_api, "user"), USER_B64)
+    _ensure_default_asset(default_avatar_path(port_api, "group"), GROUP_B64)
+    _ensure_default_asset(default_avatar_path(port_api, "logo"), LOGO_B64)
+
+
+def _ensure_default_asset(target_path : str, payload_b64 : str):
+    if path.isfile(target_path):
+        return
+    with open(target_path, "wb") as file:
+        file.write(base64.b64decode(payload_b64))
+
+
+def default_avatar_path(port_api : int, typ : str):
+    return "res/{}/avatar/{}.png".format(port_api, typ)
 
 def get_avatar(port_api : int, tid : int, typ : str):
     target_path = avatar_path(port_api, tid, typ)
     if not path.isfile(target_path):
-        return "res/{}/avatar/{}.png".format(port_api, typ)
+        return default_avatar_path(port_api, typ)
     return target_path
 
 
@@ -44,6 +48,20 @@ def avatar_path(port_api : int, tid : int, typ : str):
 def upload_avatar(port_api : int, tid : int, file_b64 : str, typ : str):
     with open(avatar_path(port_api, tid, typ), "wb") as file:
         file.write(base64.b64decode(file_b64))
+
+
+def get_default_avatar(port_api : int, typ : str):
+    return default_avatar_path(port_api, typ)
+
+
+def upload_default_avatar(port_api : int, file_b64 : str, typ : str):
+    try:
+        payload = base64.b64decode(file_b64)
+        with open(default_avatar_path(port_api, typ), "wb") as file:
+            file.write(payload)
+        return True
+    except Exception:
+        return False
 
 
 def clean_avatar(port_api : int, tid : int, typ : str):
