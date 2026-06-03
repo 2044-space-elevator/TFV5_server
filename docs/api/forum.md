@@ -59,6 +59,21 @@
 
 `<qid>` 是队列中的请求 id，获取方法见上。
 
+- `^ POST /forum/reject_forum` 拒绝论坛。
+
+论坛审核拒绝后，论坛创建者会收到一条通知。
+
+请求体：
+
+```
+{
+    "qid" : <qid>,
+    "reason" : <reason>
+}
+```
+
+其中 `<qid>` 是队列中的请求 id，`<reason>` 是可选的拒绝原因。
+
 - `* GET /forum/get_forum_list` 获取所有论坛
 
 返回体：
@@ -69,8 +84,9 @@
         <forum_id>,
         <forumname>,
         <creater_id>,
-        <creater_time>,
-        <introduction>
+        <create_time>,
+        <introduction>,
+        <post_num>
     ],
     ...
 ]
@@ -90,7 +106,7 @@
 }
 ```
 
-- `* GET /get_post_list/<fid>` 获取某一论坛的所有帖子
+- `* GET /forum/get_post_list/<fid>` 获取某一论坛的所有帖子
 
 返回体：
 
@@ -101,7 +117,7 @@
         <title>,
         <creater>,
         <content>,
-        <create_time>
+        <send_time>
     ]
 ]
 ```
@@ -120,7 +136,7 @@
 ```
 
 
-- `^ POST /forum/remove_post` 删除论坛
+- `^ POST /forum/remove_forum` 删除论坛
 
 **只有论坛创始人、管理员有权限操作**
 

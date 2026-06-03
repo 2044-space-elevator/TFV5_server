@@ -77,3 +77,8 @@ class NotificationsDb(Db):
         self.create_user_table(uid)
         self.execute("DELETE FROM U{}".format(uid))
         return True
+
+    def delete_user_table(self, uid : int):
+        uid = int(uid)
+        self.execute("DROP TABLE IF EXISTS U{}".format(uid))
+        return True

@@ -29,5 +29,19 @@ class FileDb(Db):
         self.execute("UPDATE file SET active = FALSE WHERE send_time < ?", (time_end,))
         return query_ans
 
+    def query_sender_files(self, sender : int):
+        return self.query("SELECT * FROM file WHERE sender = ?", (sender,))
+
+    def clean_sender_files(self, sender : int):
+        with self.lock:
+            def operation():
+                self.cursor.execute("SELECT * FROM file WHERE sender = ?", (sender,))
+                rows = self.cursor.fetchall()
+                self.cursor.execute("DELETE FROM file WHERE sender = ?", (sender,))
+                self.conn.commit()
+                return rows
+
+            return self._execute_with_retry(operation)
+
     def return_file(self, hashes : str):
         return self.query("SELECT * FROM file WHERE hash = ?", (hashes,))

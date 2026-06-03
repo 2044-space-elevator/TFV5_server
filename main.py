@@ -1,3 +1,4 @@
+import argparse
 import json
 import asyncio
 from argon2 import PasswordHasher
@@ -12,6 +13,7 @@ import logging
 from crypto import generate_rsa_keys, load_pub, load_pri
 import time
 import os
+import sys
 
 ASCII_LOGO = """
 ####### #######    #     # #######   ##  #####                                     ##   
@@ -55,12 +57,31 @@ TCP_THREAD = None
 INSTANT_CONTACT = None
 IMGCAPTCHA = None
 HASHER = None
+ENABLE_DEBUG = False
+ENABLE_WERKZEUG_LOG = False
 
 # Sql 游标
 # 节省资源，一个游标用到天荒地老
 
 FORUM_CURSOR = None
 USER_CURSOR = None
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="TouchFish V5 server")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--create-new-config", action="store_true", help="创建新的服务器配置")
+    mode_group.add_argument("--use-config", help="使用指定编号的服务器配置")
+    parser.add_argument("--start-api", action="store_true", help="直接启动内置 API 服务器")
+    parser.add_argument("--debug", action="store_true", help="启动内置 API 服务器时启用 Flask debug")
+    parser.add_argument("--log", action="store_true", help="启动内置 API 服务器时输出 Werkzeug 日志")
+    args = parser.parse_args(argv)
+    args.cli_mode = len(sys.argv) > 1 if argv is None else len(argv) > 0
+    return args
+
+
+def normalize_working_directory():
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 
 def create_new_server():
@@ -171,12 +192,12 @@ def create_new_server():
     NOTIFICATION_CURSOR.create_user_table(0)
     
 def flask_thread():
-    FLASK_APP.run(host='0.0.0.0', port = PORT_API, debug=False)
+    FLASK_APP.run(host='0.0.0.0', port=PORT_API, debug=ENABLE_DEBUG, use_reloader=False)
 
 def tcp_thread():
     asyncio.run(INSTANT_CONTACT.main())
 
-def main():
+def main(args=None):
     global IMGCAPTCHA
     global FLASK_THREAD
     global INSTANT_CONTACT
@@ -187,7 +208,13 @@ def main():
     global PRI_KEY
     global USER_CURSOR
     global FLASK_APP
+    global ENABLE_DEBUG
+    global ENABLE_WERKZEUG_LOG
 
+    if args is None:
+        args = parse_args([])
+
+    normalize_working_directory()
     IMGCAPTCHA = ImageCaptcha()
     HASHER = PasswordHasher(
         time_cost=2,
@@ -196,9 +223,13 @@ def main():
         hash_len=24,
         salt_len=16
     )
+    ENABLE_DEBUG = args.debug
+    ENABLE_WERKZEUG_LOG = args.log
     print(ASCII_LOGO)
     prt("欢迎来到 TouchFish V5 服务器！", "green")
-    chosen = 0
+    chosen = None
+    server_lst = None
+    cnt = 0
     try:
         with open("server_config.json", "r+") as file:
             server_lst = json.load(file)
@@ -211,7 +242,19 @@ def main():
         create_new_server()
         chosen = -1
     
-    if chosen == 0:
+    if chosen is None:
+        if args.create_new_config:
+            create_new_server()
+            chosen = -1
+        elif args.use_config is not None:
+            chosen = str(args.use_config)
+            if chosen not in server_lst:
+                raise ValueError("配置 {} 不存在，请检查 --use-config 参数。".format(chosen))
+            PORT_API, PORT_TCP = server_lst[chosen]
+        elif args.cli_mode:
+            raise ValueError("命令行模式下请使用 --use-config 指定配置，或使用 --create-new-config 创建新配置。")
+
+    if chosen is None:
         chosen = input("选择配置：")
         if chosen == str(cnt):
             create_new_server()
@@ -236,19 +279,24 @@ def main():
     GROUP_CURSOR = db.GroupDb("res/{}/db/group.db".format(PORT_API), PORT_API)
     INSTANT_CONTACT = InstantConnect(PORT_API, PORT_TCP, NOTIFICATION_CURSOR, USER_CURSOR)
     FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR, FILE_CURSOR, NOTIFICATION_CURSOR, GROUP_CURSOR, INSTANT_CONTACT)
-    prt("注意：生产环境内不要显式启动 api 服务器！", "yellow")
-    stat = input("是否直接显式启动 api 服务器？[Y]")
-    if stat == 'Y' or stat == 'y':
+    start_api = args.start_api
+    if not args.cli_mode:
+        prt("注意：生产环境内不要显式启动 api 服务器！", "yellow")
+        stat = input("是否直接显式启动 api 服务器？[y/N]:")
+        start_api = (stat == 'Y' or stat == 'y')
+
+    if start_api:
+        prt("注意：生产环境内不要显式启动 api 服务器！", "yellow")
         print("启动 API 服务器")
         log = logging.getLogger("werkzeug")
-        log.disabled = True
+        log.disabled = not ENABLE_WERKZEUG_LOG
         FLASK_THREAD = threading.Thread(target=flask_thread)
     print("启动 TCP 服务器")
 
 
 if __name__ == '__main__':
     try:
-        main()
+        main(parse_args())
         if FLASK_THREAD:
             FLASK_THREAD.start()
         if INSTANT_CONTACT:

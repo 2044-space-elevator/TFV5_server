@@ -25,6 +25,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     app = Flask(__name__)
     api = return_app_route(app, pri)
     limiter = RateLimiter(port_api)
+    manager_auths = {"admin", "root"}
+    managed_auths = {"user", "banned", "admin", "root"}
     locks = {
         'config': threading.Lock(),
         'activate': threading.Lock(),
@@ -42,12 +44,23 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             "meta" : meta or {}
         }
 
-    def run_notification_side_effect(action : str, callback):
+    def run_side_effect(action : str, callback):
         try:
             return callback()
         except Exception as e:
-            print("[WARN] 通知流程失败({}): {}".format(action, e))
+            print("[WARN] 副作用失败({}): {}".format(action, e))
             return None
+
+    def run_notification_side_effect(action : str, callback):
+        return run_side_effect("notification/{}".format(action), callback)
+
+    def ensure_notification_table(target_uid : int):
+        try:
+            notification_cursor.create_user_table(target_uid)
+            return True
+        except Exception as e:
+            print("[WARN] 创建通知表失败(uid={}): {}".format(target_uid, e))
+            return False
 
     def notify_user(target_uid : int, event : str, title : str, content : str, sender=None, meta=None):
         def callback():
@@ -78,6 +91,78 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if ret is None:
             return []
         return ret
+
+    def read_config():
+        with locks['config']:
+            with open("res/{}/config.json".format(port_api), "r+", encoding="utf-8") as file:
+                return json.load(file)
+
+    def update_config(mutator):
+        with locks['config']:
+            with open("res/{}/config.json".format(port_api), "r+", encoding="utf-8") as file:
+                cfg = json.load(file)
+            mutator(cfg)
+            with open("res/{}/config.json".format(port_api), "w+", encoding="utf-8") as file:
+                json.dump(cfg, file)
+        return cfg
+
+    def serialize_server_settings(cfg, include_manage=False):
+        ret = {
+            "server_name" : cfg.get("server_name", "TouchFish"),
+            "port_api" : port_api,
+            "port_tcp" : port_tcp,
+            "captcha" : bool(cfg.get("captcha", False)),
+            "file_last_time" : cfg.get("file_last_time", 72),
+            "groups_limit" : cfg.get("groups_limit", 30),
+            "single_group_max_people" : cfg.get("single_group_max_people", 200),
+            "max_file_size" : cfg.get("max_file_size", -1),
+            "email_activate" : bool(cfg.get("email_activate")),
+            "default_asset_urls" : {
+                "logo" : "/avatar/get_logo",
+                "forum" : "/avatar/get_default/forum",
+                "user" : "/avatar/get_default/user",
+                "group" : "/avatar/get_default/group"
+            }
+        }
+        if include_manage:
+            ret["rate_limits"] = cfg.get("rate_limits", {})
+            if cfg.get("email_activate"):
+                ret["verify_email"] = cfg.get("email_activate")
+        return ret
+
+    def parse_int_setting(value, minimum=0, allow_unlimited=False):
+        if isinstance(value, bool):
+            raise ValueError("bool is not a valid integer setting")
+        parsed = int(value)
+        if allow_unlimited and parsed == -1:
+            return parsed
+        if parsed < minimum:
+            raise ValueError("setting is below minimum")
+        return parsed
+
+    def parse_bool_flag(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "y", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "n", "off", ""}:
+                return False
+        return False
+
+    def serialize_user_summary(row):
+        return {
+            "uid" : row[0],
+            "username" : row[1],
+            "email" : row[2],
+            "stat" : row[3],
+            "create_time" : row[4],
+            "personal_sign" : row[5],
+            "introduction" : row[6]
+        }
 
     def extract_mentioned_uids(comment : str):
         mentioned_uids = set()
@@ -115,6 +200,129 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
     def serialize_notifications(rows):
         return json.dumps(notification_cursor.serialize_rows(rows), ensure_ascii=False)
+
+    def get_user_row(uid):
+        info = user_cursor.uid_query(uid)
+        if not info:
+            return None
+        return info[0]
+
+    def verify_manager(uid, pwd):
+        if not user_cursor.verify_user(uid, pwd):
+            return None
+        operator = get_user_row(uid)
+        if operator is None:
+            return None
+        if operator[4] not in manager_auths:
+            return None
+        return operator
+
+    def verify_root(uid, pwd):
+        operator = verify_manager(uid, pwd)
+        if operator is None or operator[4] != "root":
+            return None
+        return operator
+
+    def can_manage_auth(operator_auth : str, target_auth : str):
+        if operator_auth == "root":
+            return target_auth in managed_auths
+        if operator_auth == "admin":
+            return target_auth in {"user", "banned"}
+        return False
+
+    def resolve_managed_target(operator_auth : str, target_uid : int, next_auth=None, deleting=False):
+        target = get_user_row(target_uid)
+        if target is None:
+            return None
+
+        target_auth = target[4]
+        if not can_manage_auth(operator_auth, target_auth):
+            return None
+        if next_auth is not None and not can_manage_auth(operator_auth, next_auth):
+            return None
+        return target
+
+    def un_optional_managed_auth(raw_auth):
+        if raw_auth is None:
+            return None
+        if isinstance(raw_auth, str):
+            raw_auth = raw_auth.strip()
+            if not raw_auth:
+                return None
+        return raw_auth
+
+    def collect_managed_updates(req, next_auth=None):
+        updates = {}
+        if "username" in req:
+            updates["username"] = req["username"]
+        if "target_password" in req:
+            updates["password"] = req["target_password"]
+        if "email" in req:
+            updates["email"] = req["email"]
+        if next_auth is not None:
+            updates["stat"] = next_auth
+        if "sign" in req:
+            updates["sign"] = req["sign"]
+        if "introduction" in req:
+            updates["introduction"] = req["introduction"]
+        return updates
+
+    def cleanup_forum_queue(target_uid : int):
+        target_uid = int(target_uid)
+        with locks['queue']:
+            with open("res/{}/forum/queue.json".format(port_api), "r+", encoding="utf-8") as file:
+                queue = json.load(file)
+
+            removed_keys = [
+                key
+                for key, value in queue.items()
+                if key.isdigit() and isinstance(value, dict) and value.get("creater") == target_uid
+            ]
+
+            if not removed_keys:
+                return True
+
+            for key in removed_keys:
+                del queue[key]
+
+            queue["queue_num"] = max(queue.get("queue_num", 0) - len(removed_keys), 0)
+
+            with open("res/{}/forum/queue.json".format(port_api), "w+", encoding="utf-8") as file:
+                json.dump(queue, file)
+
+        return True
+
+    def clean_deleted_user_state(target_uid : int):
+        target_uid = int(target_uid)
+        deleted_group_ids = [row[0] for row in group_cursor.query_creater(target_uid)]
+        deleted_forum_ids = [row[0] for row in forum_cursor.query_forum_creater(target_uid)]
+
+        avatar.clean_avatar(port_api, target_uid, "user")
+        for gid in deleted_group_ids:
+            avatar.clean_avatar(port_api, gid, "group")
+        for fid in deleted_forum_ids:
+            avatar.clean_avatar(port_api, fid, "forum")
+
+        file.clean_user_files(port_api, target_uid, file_cursor)
+        group_cursor.clean_user_membership(target_uid)
+        forum_cursor.clean_user_content(target_uid)
+        cleanup_forum_queue(target_uid)
+        return True
+
+    def perform_managed_auth_change(uid : int, pwd : str, target_uid : int, new_auth : str):
+        operator = verify_manager(uid, pwd)
+        if operator is None:
+            return False
+
+        target = resolve_managed_target(operator[4], target_uid, next_auth=new_auth)
+        if target is None:
+            return False
+
+        if not user_cursor.update_user_with_root_guard(target_uid, stat=new_auth):
+            return False
+
+        notify_user(target_uid, "auth.stat.changed", "账号状态已变更", "你的账号状态已更新为 {}。".format(new_auth), sender=uid, meta={"new_auth" : new_auth})
+        return True
     
     @app.before_request
     def check_rate_limit():
@@ -263,9 +471,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         succeeded = user_cursor.user_create(username, password, time.time(), email)
         if not succeeded:
             return bool_res()[False]
+        target_uid = user_cursor.username_query(username)[0][0]
         if is_email_activate and succeeded:
-            user_cursor.change_auth(user_cursor.username_query(username)[0][0], "banned")
-        notification_cursor.create_user_table(user_cursor.username_query(username)[0][0])
+            user_cursor.change_auth(target_uid, "banned")
+        if not ensure_notification_table(target_uid):
+            user_cursor.delete_user(target_uid)
+            return bool_res()[False]
         return bool_res()[True]
 
     @api("/auth/activate", methods=["POST"])
@@ -290,30 +501,172 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             pwd = req["password"]
             oped = req["change_uid"]
             new_auth = req["new_auth"]
-            if not new_auth in ["user", "banned", "admin"]:
+            return bool_res()[perform_managed_auth_change(uid, pwd, oped, new_auth)]
+        except:
+            return bool_res()[False]
+
+    @api("/auth/manage/create", methods=["POST"])
+    def manage_create_user(req):
+        try:
+            uid = req["uid"]
+            pwd = req["password"]
+            username = req["username"]
+            target_password = req["target_password"]
+            new_auth = req.get("new_auth", "user")
+            email = req["email"] if "email" in req else None
+
+            operator = verify_manager(uid, pwd)
+            if operator is None:
+                return bool_res()[False]
+            if not can_manage_auth(operator[4], new_auth):
                 return bool_res()[False]
 
-            if not user_cursor.verify_user(uid, pwd):
+            if not user_cursor.user_create(username, target_password, time.time(), email, stat=new_auth):
                 return bool_res()[False]
 
-            op_auth = user_cursor.uid_query(uid)[0][4]
-            oped_auth = user_cursor.uid_query(oped)[0][4]
-            if op_auth == 'user' or op_auth == 'banned':
+            target = user_cursor.username_query(username)
+            if not target:
                 return bool_res()[False]
-            
-            if op_auth == "admin":
-                if oped_auth == "admin" or oped_auth == "root":
-                    return bool_res()[False]
-                if new_auth == "admin":
-                    return bool_res()[False]
-            
-            if op_auth == "root":
-                if oped_auth == "root":
-                    return bool_res()[False]
-            
-            user_cursor.change_auth(oped, new_auth)
-            notify_user(oped, "auth.stat.changed", "账号状态已变更", "你的账号状态已更新为 {}。".format(new_auth), sender=uid, meta={"new_auth" : new_auth})
+
+            target_uid = target[0][0]
+            extra_updates = {}
+            if "sign" in req:
+                extra_updates["sign"] = req["sign"]
+            if "introduction" in req:
+                extra_updates["introduction"] = req["introduction"]
+
+            if extra_updates and not user_cursor.update_user(target_uid, **extra_updates):
+                user_cursor.delete_user(target_uid)
+                return bool_res()[False]
+
+            if not ensure_notification_table(target_uid):
+                user_cursor.delete_user(target_uid)
+                return bool_res()[False]
             return bool_res()[True]
+        except:
+            return bool_res()[False]
+
+    @api("/auth/manage/update", methods=["POST"])
+    def manage_update_user(req):
+        try:
+            uid = req["uid"]
+            pwd = req["password"]
+            target_uid = req["change_uid"]
+            next_auth = un_optional_managed_auth(req.get("new_auth"))
+
+            operator = verify_manager(uid, pwd)
+            if operator is None:
+                return bool_res()[False]
+
+            target = resolve_managed_target(operator[4], target_uid, next_auth=next_auth)
+            if target is None:
+                return bool_res()[False]
+
+            updates = collect_managed_updates(req, next_auth=next_auth)
+            if not updates:
+                return bool_res()[False]
+
+            if not user_cursor.update_user_with_root_guard(target_uid, **updates):
+                return bool_res()[False]
+
+            if next_auth is not None:
+                notify_user(target_uid, "auth.stat.changed", "账号状态已变更", "你的账号状态已更新为 {}。".format(next_auth), sender=uid, meta={"new_auth" : next_auth})
+            return bool_res()[True]
+        except:
+            return bool_res()[False]
+
+    @api("/auth/manage/ban", methods=["POST"])
+    def manage_ban_user(req):
+        try:
+            uid = req["uid"]
+            pwd = req["password"]
+            target_uid = req["change_uid"]
+            return bool_res()[perform_managed_auth_change(uid, pwd, target_uid, "banned")]
+        except:
+            return bool_res()[False]
+
+    @api("/auth/manage/delete", methods=["POST"])
+    def manage_delete_user(req):
+        try:
+            uid = req["uid"]
+            pwd = req["password"]
+            target_uid = int(req["change_uid"])
+
+            operator = verify_manager(uid, pwd)
+            if operator is None:
+                return bool_res()[False]
+
+            target = resolve_managed_target(operator[4], target_uid, deleting=True)
+            if target is None:
+                return bool_res()[False]
+
+            if target[4] == "root" and user_cursor.count_users_with_stat("root") <= 1:
+                return bool_res()[False]
+
+            if not user_cursor.delete_user_with_root_guard(target_uid):
+                return bool_res()[False]
+
+            run_side_effect(
+                "disconnect_deleted_user",
+                lambda: instant_contact.disconnect_user(target_uid)
+            )
+            run_side_effect(
+                "clean_deleted_user_state",
+                lambda: clean_deleted_user_state(target_uid)
+            )
+            run_side_effect(
+                "delete_user_notification_table",
+                lambda: notification_cursor.delete_user_table(target_uid)
+            )
+            return bool_res()[True]
+        except:
+            return bool_res()[False]
+
+    @api("/auth/manage/list", methods=['POST'])
+    def manage_list_users(req):
+        try:
+            uid = req["uid"]
+            pwd = req["password"]
+
+            if verify_manager(uid, pwd) is None:
+                return bool_res()[False]
+
+            requested_page_size = req.get("page_size", 50)
+            fetch_all = parse_bool_flag(req.get("fetch_all", False)) or str(requested_page_size) == "-1"
+            total = user_cursor.count_users()
+
+            if fetch_all:
+                rows = user_cursor.list_users()
+                return json.dumps({
+                    "users" : [serialize_user_summary(row) for row in rows],
+                    "pagination" : {
+                        "page" : 1,
+                        "page_size" : len(rows),
+                        "total" : total,
+                        "total_pages" : 1 if total else 0,
+                        "has_more" : False
+                    },
+                    "fetch_all" : True
+                }, ensure_ascii=False)
+
+            page_size = parse_int_setting(requested_page_size, minimum=1)
+            page_size = min(page_size, 500)
+            page = parse_int_setting(req.get("page", 1), minimum=1)
+            offset = (page - 1) * page_size
+            rows = user_cursor.list_users(limit=page_size, offset=offset)
+            total_pages = (total + page_size - 1) // page_size if total else 0
+
+            return json.dumps({
+                "users" : [serialize_user_summary(row) for row in rows],
+                "pagination" : {
+                    "page" : page,
+                    "page_size" : page_size,
+                    "total" : total,
+                    "total_pages" : total_pages,
+                    "has_more" : offset + len(rows) < total
+                },
+                "fetch_all" : False
+            }, ensure_ascii=False)
         except:
             return bool_res()[False]
     
@@ -392,6 +745,61 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 json.dump(cfg, f)
         return bool_res()[True]
 
+    @api("/auth/server_settings/query", methods=['POST'])
+    def query_server_settings(req):
+        try:
+            uid = req["uid"]
+            pwd = req["password"]
+            if verify_root(uid, pwd) is None:
+                return bool_res()[False]
+            return json.dumps(serialize_server_settings(read_config(), include_manage=True), ensure_ascii=False)
+        except:
+            return bool_res()[False]
+
+    @api("/auth/server_settings/update", methods=['POST'])
+    def update_server_settings(req):
+        try:
+            uid = req["uid"]
+            pwd = req["password"]
+            if verify_root(uid, pwd) is None:
+                return bool_res()[False]
+
+            updates = {}
+
+            if "server_name" in req:
+                server_name = req["server_name"]
+                if not isinstance(server_name, str):
+                    return bool_res()[False]
+                server_name = server_name.strip()
+                if not server_name:
+                    return bool_res()[False]
+                updates["server_name"] = server_name
+
+            if "captcha" in req:
+                if not isinstance(req["captcha"], bool):
+                    return bool_res()[False]
+                updates["captcha"] = req["captcha"]
+
+            if "file_last_time" in req:
+                updates["file_last_time"] = parse_int_setting(req["file_last_time"], minimum=0)
+
+            if "groups_limit" in req:
+                updates["groups_limit"] = parse_int_setting(req["groups_limit"], minimum=1, allow_unlimited=True)
+
+            if "single_group_max_people" in req:
+                updates["single_group_max_people"] = parse_int_setting(req["single_group_max_people"], minimum=1, allow_unlimited=True)
+
+            if "max_file_size" in req:
+                updates["max_file_size"] = parse_int_setting(req["max_file_size"], minimum=0, allow_unlimited=True)
+
+            if not updates:
+                return bool_res()[False]
+
+            cfg = update_config(lambda current: current.update(updates))
+            return json.dumps(serialize_server_settings(cfg, include_manage=True), ensure_ascii=False)
+        except:
+            return bool_res()[False]
+
     @api("/notification/query_all", methods=['POST'])
     def query_all_notifications(req):
         uid = req["uid"]
@@ -434,22 +842,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
     @app.route("/info")
     def info():
-        with locks['config']:
-            with open("res/{}/config.json".format(port_api), "r+") as file:
-                cfg = json.load(file)
-        ret = {}
-        ret["server_name"] = cfg["server_name"]
-        ret["port_api"] = port_api
-        ret["port_tcp"] = port_tcp
-        ret["captcha"] = cfg["captcha"]
-        ret["file_last_time"] = cfg["file_last_time"]
-        ret["groups_limit"] = cfg["groups_limit"]
-        ret["single_group_max_people"] = cfg["single_group_max_people"]
-        if cfg["email_activate"]:
-            ret["email_activate"] = True
-        else:
-            ret["email_activate"] = False
-        return ret
+        return serialize_server_settings(read_config())
 
     @api("/forum/create_forum", methods=["POST"])
     def create_forum(req):
@@ -509,10 +902,38 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             fchosen = queue[str(qid)]
             fid = forum_cursor.create_forum(fchosen["forumname"], fchosen["creater"], fchosen["introduction"]) 
             del queue[str(qid)]
-            queue["queue_num"] -= 1
+            queue["queue_num"] = max(queue["queue_num"] - 1, 0)
             with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
                 json.dump(queue, file)
         notify_user(fchosen["creater"], "forum.approved", "论坛已通过审核", "你创建的论坛 {} 已通过审核。".format(fchosen["forumname"]), sender=uid, meta={"fid" : fid, "forum_name" : fchosen["forumname"]})
+        return bool_res()[True]
+
+    @api("/forum/reject_forum", methods=["POST"])
+    def reject_forum(req):
+        uid = req["uid"]
+        password = req["password"]
+        qid = req["qid"]
+        reason = req.get("reason")
+        if not isinstance(reason, str):
+            reason = ""
+        reason = reason.strip()
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if not user_stat in ["admin", "root"]:
+            return bool_res()[False]
+        with locks['queue']:
+            with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
+                queue = json.load(file)
+            if str(qid) not in queue:
+                return bool_res()[False]
+            fchosen = queue[str(qid)]
+            del queue[str(qid)]
+            queue["queue_num"] = max(queue["queue_num"] - 1, 0)
+            with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
+                json.dump(queue, file)
+        reason_suffix = "原因：{}".format(reason) if reason else ""
+        notify_user(fchosen["creater"], "forum.rejected", "论坛未通过审核", "你创建的论坛 {} 未通过审核。{}".format(fchosen["forumname"], reason_suffix), sender=uid, meta={"qid" : qid, "forum_name" : fchosen["forumname"], "reason" : reason})
         return bool_res()[True]
 
     @app.route("/forum/get_forum_list")
@@ -560,6 +981,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         creater = forum_info[0][2]
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not (user_stat in ["admin", "root"] or uid == creater):
+            return bool_res()[False]
+        try:
+            avatar.clean_avatar(port_api, fid, "forum")
+        except Exception:
             return bool_res()[False]
         forum_cursor.delete_forum(fid)
         return bool_res()[True]
@@ -677,10 +1102,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not typ in ["forum", "user", "group"]:
             return 
         return send_file(avatar.get_avatar(port_api, tid, typ))
+
+    @app.route("/avatar/get_default/<typ>")
+    def get_default_avatar(typ):
+        if not typ in ["forum", "user", "group", "logo"]:
+            return
+        return send_file(avatar.get_default_avatar(port_api, typ))
     
     @app.route("/avatar/get_logo")
     def get_logo():
-        return send_file("res/{}/avatar/logo.png".format(port_api))
+        return send_file(avatar.get_default_avatar(port_api, "logo"))
     
     @api("/avatar/upload_forum_avatar", methods=['POST'])
     def upload_forum_avatar(req):
@@ -717,6 +1148,18 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
         上传群聊 logo
         """
+
+    @api('/avatar/upload_default_avatar', methods=['POST'])
+    def upload_default_avatar(req):
+        uid = req["uid"]
+        password = req["password"]
+        pic_b64 = req["pic"]
+        asset_type = req.get("type", req.get("asset_type"))
+        if verify_manager(uid, password) is None:
+            return bool_res()[False]
+        if asset_type not in ["forum", "user", "group", "logo"]:
+            return bool_res()[False]
+        return bool_res()[avatar.upload_default_avatar(port_api, pic_b64, asset_type)]
     
     @api('/avatar/upload_logo', methods=['POST'])
     def upload_logo(req):
@@ -728,9 +1171,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not user_stat in ['admin', 'root']:
             return bool_res()[False]
-        with open("res/{}/avatar/logo.png".format(port_api), 'wb') as file:
-            file.write(base64.b64decode(pic_b64))
-        return bool_res()[True]
+        return bool_res()[avatar.upload_default_avatar(port_api, pic_b64, "logo")]
         
     @api('/file/upload_file', methods=['POST'])
     def upload_file(req):
@@ -743,9 +1184,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_cursor.uid_query(uid)[0][4]
         if user_stat == 'banned':
             return bool_res()[False]
-        with locks['config']:
-            with open("res/{}/config.json".format(port_api), "r+") as f:
-                max_file_size = json.load(f).get("max_file_size", 0)
+        max_file_size = read_config().get("max_file_size", -1)
         if max_file_size != -1 and len(base64.b64decode(file_b64)) > max_file_size:
             return bool_res()[False]
         file.upload_file(port_api, uid, file_b64, filename, file_cursor)
@@ -942,6 +1381,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         else:
             group_name = str(gid)
             target_uids = []
+        try:
+            avatar.clean_avatar(port_api, gid, "group")
+        except Exception:
+            return bool_res()[False]
         group_cursor.delete_group(gid)
         notify_users([target_uid for target_uid in target_uids if target_uid != uid], "group.deleted", "群聊已解散", "群 {} 已被解散。".format(group_name), sender=uid, meta={"gid" : gid})
         return bool_res()[True]

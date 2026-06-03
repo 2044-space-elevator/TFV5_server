@@ -101,7 +101,8 @@ class GroupDb(Db):
         with open("res/{}/config.json".format(self.api_pt), "r+") as file:
             cfg = json.load(file)
         created_by = self.query_creater(creater)
-        if len(created_by) >= cfg["groups_limit"]:
+        groups_limit = cfg.get("groups_limit", 30)
+        if groups_limit != -1 and len(created_by) >= groups_limit:
             return False
         gid = self.query("SELECT MAX(gid) from groups")[0][0]
         if gid == None:
@@ -119,6 +120,11 @@ class GroupDb(Db):
         members = json.loads(members[0][3])
         if new_memeber in members:
             return False
+        with open("res/{}/config.json".format(self.api_pt), "r+") as file:
+            cfg = json.load(file)
+        single_group_max_people = cfg.get("single_group_max_people", 200)
+        if single_group_max_people != -1 and len(members) >= single_group_max_people:
+            return False
         members.append(new_memeber)
         self.execute("UPDATE groups SET members = ? WHERE gid = ?", (str(members), gid))
         return True
@@ -126,3 +132,41 @@ class GroupDb(Db):
     def delete_group(self, gid : int):
         self.execute("DROP TABLE IF EXISTS G{}".format(gid))
         self.execute("DELETE FROM groups WHERE gid = ?", (gid,))
+
+    def remove_user_membership(self, uid : int):
+        uid = int(uid)
+        with self.lock:
+            def operation():
+                self.cursor.execute("SELECT gid, creater, members, admins FROM groups")
+                groups = self.cursor.fetchall()
+                deleted_gids = []
+
+                for gid, creater, members_raw, admins_raw in groups:
+                    if creater == uid:
+                        self.cursor.execute("DROP TABLE IF EXISTS G{}".format(gid))
+                        self.cursor.execute("DELETE FROM groups WHERE gid = ?", (gid,))
+                        deleted_gids.append(gid)
+                        continue
+
+                    members = json.loads(members_raw)
+                    admins = json.loads(admins_raw)
+                    changed = False
+
+                    if uid in members:
+                        members = [member for member in members if member != uid]
+                        changed = True
+
+                    if uid in admins:
+                        admins = [admin for admin in admins if admin != uid]
+                        changed = True
+
+                    if changed:
+                        self.cursor.execute(
+                            "UPDATE groups SET members = ?, admins = ? WHERE gid = ?",
+                            (str(members), str(admins), gid),
+                        )
+
+                self.conn.commit()
+                return deleted_gids
+
+            return self._execute_with_retry(operation)

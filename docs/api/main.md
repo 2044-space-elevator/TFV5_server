@@ -4,7 +4,7 @@
 
 本文章主要介绍 TFV5 api 中的约定俗成以及加密规定，作为所有 API 的基础。
 
-因为 TFV5 API 体系较为庞大，如有问题可在 Github 上或 TF 群里资讯。
+因为 TFV5 API 体系较为庞大，如有问题可在 Github 上或 TF 群里咨询。
 
 **错误访问和访问失败可能会返回 API 规定的结果，也可能返回空 JSON 或字符串 `Wrong Requests!`。**
 
@@ -28,7 +28,7 @@
 
 约定 2：要带用户 uid 和密码的 API 条目前面**加** ^ 号，不带用户 uid 和密码的 API 条目前面**不加** ^ 号。
 
-**用户密码是明文传输**，但保证带有 ^ 号的一定不加 * 号。以确保明文传输密码时的安全
+**用户密码要以明文字段放在真正的请求体里**，但保证带有 ^ 号的一定不加 * 号。以确保密码传输时仍走 secret 类型加密。
 
 对于约定 2 中如何上传请求体，详见[API类型和对应请求方法](#api-类型和对应请求方法)。
 
@@ -44,7 +44,7 @@
 
 请求体：无。
 
-返回值：PEM 格式的 RSA 公钥文件，文件名为 `<servername>.pem`，其中 servername 是以服务器的端口。
+返回值：PEM 格式的 RSA 公钥文件，文件名为 `<port_api>.pem`，其中 `port_api` 是服务器的 API 端口。
 
 服务器在部署成功后会自动生成公钥哈希值，TFV5 要求部署者将哈希值通过可靠的方式公布于用户中。**为防止中间人攻击，务必对公钥文件进行 SHA256 哈希并校对部署者提供的公钥哈希值**。
 
@@ -84,7 +84,7 @@ os.urandom(16)
 os.urandom(32)
 ```
 
-**将你生成的 AES 密钥使用服务器的 RSA 公钥进行 AES 加密，得到 bytes 串，将该 bytes 串使用 Base64 编码后再用 UTF-8 解码成字符串并传入 `<key>`**。
+**将你生成的 AES 密钥使用服务器的 RSA 公钥进行 RSA 加密，得到 bytes 串，将该 bytes 串使用 Base64 编码后再用 UTF-8 解码成字符串并传入 `<key>`**。
 
 接着 `Content` 是 secret API 真正要求的请求体，格式为以字符串形式表示的 JSON。
 
@@ -102,10 +102,9 @@ os.urandom(32)
 
 ```json
 {
-    "uid" : <uid>
-    "password" : <password>
-    # Request body
-    # ......
+    "uid" : <uid>,
+    "password" : <password>,
+    ...
 }
 ```
 
@@ -126,28 +125,14 @@ os.urandom(32)
 
 ## 对于 secret 类型 API 的测试用例
 
-加密流程有一点复杂，因此举个例子，请将 TFV5 代码包下载，解压，使用终端切换到 contact 目录。
+加密流程有一点复杂，因此举个例子，请将 TFV5 代码包下载，解压，使用终端切换到 `TFV5_server` 目录。
 
 确保你的 Python 环境中有 `cryptography` 库、`Flask` 库与 `requests` 库。
 
-请在终端中打开 `python`，输入：
+请先启动一个 TFV5 服务端，并确认 `test2.py` 中的 `pub_path` 与 `url` 指向你要测试的服务器；默认示例使用的是本地 `7001` 端口。
 
-```python
-import crypto
-pri, pub, pripem, pubpem, has = crypto.generate_rsa_keys()
-with open("pub.pem", "wb") as file:
-    file.write(pubpem)
+运行 `test2.py`，输入所求。
 
-with open("pri.pem", "wb") as file:
-    file.write(pripem)
-```
+如果在 `test2.py` 的输出看到了发出的请求体，并且看到了解密后的返回体，证明加密 API 通信成功。
 
-**测试完成后，建议删除目录下的 pub.pem 和 pri.pem。**
-
-获取公钥、私钥的绝对路径。
-
-运行 test1.py，与此同时运行 test2.py，输入所求。
-
-如果在 test1.py 的输出看到了请求体，test2.py 的输出看到了 `Hello World`，证明加密 API 通信成功。
-
-开发者可以通过阅读 `test2.py` 的代码来理解 secret API 请求的原理。
+开发者可以通过阅读 `test2.py` 的代码来理解 secret API 请求的原理。若需要测试 TCP WebSocket，可参考 `test3.py`。

@@ -43,6 +43,15 @@ class InstantConnect():
         if queue is not None:
             await queue.put(message)
 
+    async def _disconnect_user(self, uid : int):
+        for websocket in list(self.connected_clients.get(uid, [])):
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+            finally:
+                self._cleanup_client(websocket)
+
     def notify_user(self, uid : int, notification : dict):
         record = {
             "time_stamp" : self.notification_cursor.add_event(uid, notification),
@@ -56,6 +65,14 @@ class InstantConnect():
                 self.loop
             )
         return record
+
+    def disconnect_user(self, uid : int):
+        if self.loop is None:
+            for websocket in list(self.connected_clients.get(uid, [])):
+                self._cleanup_client(websocket)
+            return
+
+        asyncio.run_coroutine_threadsafe(self._disconnect_user(uid), self.loop)
     
     async def sender(self, websocket, queue):
         try:
