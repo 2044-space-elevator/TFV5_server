@@ -242,7 +242,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return None
         return target
 
-    def collect_managed_updates(req):
+    def un_optional_managed_auth(raw_auth):
+        if raw_auth is None:
+            return None
+        if isinstance(raw_auth, str):
+            raw_auth = raw_auth.strip()
+            if not raw_auth:
+                return None
+        return raw_auth
+
+    def collect_managed_updates(req, next_auth=None):
         updates = {}
         if "username" in req:
             updates["username"] = req["username"]
@@ -250,8 +259,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             updates["password"] = req["target_password"]
         if "email" in req:
             updates["email"] = req["email"]
-        if "new_auth" in req:
-            updates["stat"] = req["new_auth"]
+        if next_auth is not None:
+            updates["stat"] = next_auth
         if "sign" in req:
             updates["sign"] = req["sign"]
         if "introduction" in req:
@@ -543,7 +552,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             uid = req["uid"]
             pwd = req["password"]
             target_uid = req["change_uid"]
-            next_auth = req["new_auth"] if "new_auth" in req else None
+            next_auth = un_optional_managed_auth(req.get("new_auth"))
 
             operator = verify_manager(uid, pwd)
             if operator is None:
@@ -553,15 +562,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if target is None:
                 return bool_res()[False]
 
-            updates = collect_managed_updates(req)
+            updates = collect_managed_updates(req, next_auth=next_auth)
             if not updates:
                 return bool_res()[False]
 
             if not user_cursor.update_user_with_root_guard(target_uid, **updates):
                 return bool_res()[False]
 
-            if "new_auth" in req:
-                notify_user(target_uid, "auth.stat.changed", "账号状态已变更", "你的账号状态已更新为 {}。".format(req["new_auth"]), sender=uid, meta={"new_auth" : req["new_auth"]})
+            if next_auth is not None:
+                notify_user(target_uid, "auth.stat.changed", "账号状态已变更", "你的账号状态已更新为 {}。".format(next_auth), sender=uid, meta={"new_auth" : next_auth})
             return bool_res()[True]
         except:
             return bool_res()[False]
