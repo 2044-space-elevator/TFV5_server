@@ -24,10 +24,15 @@ def file_path(port_api : int, hashes : str):
     return "res/{}/file/{}.file".format(port_api, hashes)
 
 def upload_file(port_api : int, uid : int, file_b64 : str, file_name : str, file_cursor : FileDb):
-    hashes = sha256(str(time.time()) + str(uid) + file_name)
-    with open(file_path(port_api, hashes), "wb") as file:
-        file.write(base64.b64decode(file_b64))
-    file_cursor.tag_file(uid, file_name, time.time(), hashes)
+    content = base64.b64decode(file_b64)
+    hashes = sha256(content)
+    existing = file_cursor.return_file(hashes)
+    if existing:
+        file_cursor.increment_ref(hashes)
+    else:
+        with open(file_path(port_api, hashes), "wb") as file:
+            file.write(content)
+        file_cursor.tag_file(uid, file_name, time.time(), hashes)
     qry = file_cursor.lose_effect()
     for tmp in qry:
         tmp_path = file_path(port_api, tmp[3])
@@ -35,6 +40,13 @@ def upload_file(port_api : int, uid : int, file_b64 : str, file_name : str, file
             os.remove(tmp_path)
     return hashes
 
+def dereference_file(port_api : int, hashes : str, file_cursor : FileDb):
+    file_cursor.decrement_ref(hashes)
+    qry = file_cursor.lose_effect()
+    for tmp in qry:
+        tmp_path = file_path(port_api, tmp[3])
+        if os.path.isfile(tmp_path):
+            os.remove(tmp_path)
 
 def clean_user_files(port_api : int, uid : int, file_cursor : FileDb):
     rows = file_cursor.clean_sender_files(uid) or []
