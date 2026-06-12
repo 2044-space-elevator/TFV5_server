@@ -980,12 +980,22 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if str(qid) not in queue:
                 return bool_res()[False]
             fchosen = queue[str(qid)]
-            fid = forum_cursor.create_forum(fchosen["forumname"], fchosen["creater"], fchosen["introduction"]) 
+            entry_type = fchosen.get("type", "create")
+            if entry_type == "edit":
+                edit_fid = fchosen["fid"]
+                forum_cursor.execute(
+                    "UPDATE forums SET forumname = ?, introduction = ? WHERE fid = ?",
+                    (fchosen["forumname"], fchosen["introduction"], edit_fid)
+                )
+                fid = edit_fid
+            else:
+                fid = forum_cursor.create_forum(fchosen["forumname"], fchosen["creater"], fchosen["introduction"])
             del queue[str(qid)]
             queue["queue_num"] = max(queue["queue_num"] - 1, 0)
             with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
                 json.dump(queue, file)
-        notify_user(fchosen["creater"], "forum.approved", "论坛已通过审核", "你创建的论坛 {} 已通过审核。".format(fchosen["forumname"]), sender=uid, meta={"fid" : fid, "forum_name" : fchosen["forumname"]})
+        action_text = "编辑" if entry_type == "edit" else "创建"
+        notify_user(fchosen["creater"], "forum.approved", "论坛已通过审核", "你{}的论坛 {} 已通过审核。".format(action_text, fchosen["forumname"]), sender=uid, meta={"fid" : fid, "forum_name" : fchosen["forumname"]})
         return bool_res()[True]
 
     @api("/forum/reject_forum", methods=["POST"])
@@ -1044,7 +1054,13 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not fid.isdigit():
             return {}
         try:
-            return forum_cursor.query_all_post(int(fid))
+            fid_int = int(fid)
+            posts = forum_cursor.query_all_post(fid_int)
+            try:
+                pinned_pid = forum_cursor.get_pinned_pid(fid_int)
+            except Exception:
+                pinned_pid = None
+            return json.dumps({"posts": posts, "pinned_pid": pinned_pid})
         except OperationalError as e:
             return {}
     
@@ -1069,6 +1085,42 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         forum_cursor.delete_forum(fid)
         return bool_res()[True]
     
+    @api("/forum/edit_forum", methods=["POST"])
+    def forum_edit_forum(req):
+        """Submit forum edit to approval queue. Owner or admin/root only."""
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        forum_info = query_forum(fid)
+        if not forum_info:
+            return bool_res()[False]
+        creater = forum_info[0][2]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if not (user_stat in ["admin", "root"] or uid == creater):
+            return bool_res()[False]
+        forum_name = req.get("forum_name", forum_info[0][1])
+        introduction = req.get("introduction", forum_info[0][4] or "")
+        with locks['queue']:
+            with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
+                queue = json.load(file)
+            qid = queue['queue_num'] + 1
+            queue["queue_num"] = qid
+            for i in queue.keys():
+                if i.isdigit():
+                    qid = max(qid, int(i) + 1)
+            queue[qid] = {
+                "type" : "edit",
+                "fid" : fid,
+                "creater" : uid,
+                "forumname" : forum_name,
+                "introduction" : introduction
+            }
+            with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
+                json.dump(queue, file)
+        return bool_res()[True]
+
     @api("/forum/remove_post", methods=['POST'])
     def remove_post(req):
         uid = req["uid"]
@@ -1088,6 +1140,144 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         forum_cursor.delete_post(fid, pid)
         return bool_res()[True]
+
+    @api("/forum/pin_post", methods=["POST"])
+    def pin_post(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        pid = req["pid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        forum_info = query_forum(fid)
+        if not forum_info:
+            return bool_res()[False]
+        creater = forum_info[0][2]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if not (user_stat in ["admin", "root"] or uid == creater):
+            return bool_res()[False]
+        return bool_res()[forum_cursor.pin_post(fid, pid)]
+
+    @api("/forum/unpin_post", methods=["POST"])
+    def unpin_post(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        forum_info = query_forum(fid)
+        if not forum_info:
+            return bool_res()[False]
+        creater = forum_info[0][2]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if not (user_stat in ["admin", "root"] or uid == creater):
+            return bool_res()[False]
+        return bool_res()[forum_cursor.unpin_post(fid)]
+
+    @api("/forum/members", methods=["POST"])
+    def forum_member_list(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        forum_info = query_forum(fid)
+        if not forum_info:
+            return bool_res()[False]
+        operator_role = forum_cursor.get_member_role(fid, uid)
+        if operator_role is None or operator_role < 50:
+            return bool_res()[False]
+        rows = forum_cursor.list_members(fid)
+        return json.dumps([list(row) for row in rows])
+
+    @api("/forum/add_member", methods=["POST"])
+    def forum_add_member(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        target_uid = req["target_uid"]
+        role = req.get("role", 0)
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        operator_role = forum_cursor.get_member_role(fid, uid)
+        if operator_role is None or operator_role < 50:
+            return bool_res()[False]
+        if not user_cursor.uid_query(target_uid):
+            return bool_res()[False]
+        return bool_res()[forum_cursor.add_member(fid, target_uid, role)]
+
+    @api("/forum/remove_member", methods=["POST"])
+    def forum_remove_member(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        target_uid = req["target_uid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        operator_role = forum_cursor.get_member_role(fid, uid)
+        if operator_role is None or operator_role < 50:
+            return bool_res()[False]
+        target_role = forum_cursor.get_member_role(fid, target_uid)
+        if target_role is not None and target_role >= operator_role:
+            return bool_res()[False]
+        return bool_res()[forum_cursor.remove_member(fid, target_uid)]
+
+    @api("/forum/change_member_role", methods=["POST"])
+    def forum_change_member_role(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        target_uid = req["target_uid"]
+        new_role = req["new_role"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        operator_role = forum_cursor.get_member_role(fid, uid)
+        if operator_role is None or operator_role < 50:
+            return bool_res()[False]
+        if operator_role <= new_role and operator_role < 100:
+            return bool_res()[False]
+        return bool_res()[forum_cursor.change_member_role(fid, target_uid, new_role)]
+
+    @api("/forum/join", methods=["POST"])
+    def forum_join(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
+        if not query_forum(fid):
+            return bool_res()[False]
+        if forum_cursor.is_member(fid, uid):
+            return bool_res()[False]
+        return bool_res()[forum_cursor.add_member(fid, uid, 0)]
+
+    @api("/forum/leave", methods=["POST"])
+    def forum_leave(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        current_role = forum_cursor.get_member_role(fid, uid)
+        if current_role is None:
+            return bool_res()[False]
+        if current_role >= 100:
+            return bool_res()[False]  # owner cannot leave, must delete forum
+        return bool_res()[forum_cursor.remove_member(fid, uid)]
+
+    @api("/forum/my_memberships", methods=["POST"])
+    def forum_my_memberships(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        rows = forum_cursor.query(
+            "SELECT fid, role FROM forum_members WHERE uid = ?", (uid,)
+        )
+        return json.dumps([list(row) for row in rows])
 
     @api("/forum/comment", methods=["POST"])
     def comment(req):

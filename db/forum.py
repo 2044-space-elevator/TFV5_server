@@ -48,10 +48,26 @@ class ForumDb(Db):
         creater INTEGER,
         create_time TEXT REAL,
         introduction TEXT,
-        post_num INTEGER
+        post_num INTEGER,
+        pinned_pid INTEGER DEFAULT NULL
     )
     """
         self.execute(cmd)
+        # 兼容用
+        try:
+            self.execute("ALTER TABLE forums ADD COLUMN pinned_pid INTEGER DEFAULT NULL")
+        except Exception:
+            pass
+        # 成员表
+        self.execute("""
+    CREATE TABLE IF NOT EXISTS forum_members (
+        fid INTEGER NOT NULL,
+        uid INTEGER NOT NULL,
+        role INTEGER DEFAULT 0,
+        join_time REAL,
+        PRIMARY KEY (fid, uid)
+    )
+    """)
     
     def create_forum(self, forumname, creater : int, introduction):
         """
@@ -83,6 +99,10 @@ class ForumDb(Db):
                 (fid, forumname, creater, time(), introduction)
             )
             self.cursor.execute(cmd.format(fid))
+            self.cursor.execute(
+                "INSERT INTO forum_members (fid, uid, role, join_time) VALUES (?, ?, 100, ?)",
+                (fid, creater, time())
+            )
             self.conn.commit()
             return fid
 
@@ -146,8 +166,65 @@ class ForumDb(Db):
         update_comments(self.api_pt, add_post_bucket)
         return True
     
+    def pin_post(self, fid : int, pid : int):
+        if not self.query_post_pid(fid, pid):
+            return False
+        self.execute("UPDATE forums SET pinned_pid = ? WHERE fid = ?", (pid, fid))
+        return True
+
+    def unpin_post(self, fid : int):
+        self.execute("UPDATE forums SET pinned_pid = NULL WHERE fid = ?", (fid,))
+        return True
+
+    def get_pinned_pid(self, fid : int):
+        try:
+            row = self.query("SELECT pinned_pid FROM forums WHERE fid = ?", (fid,))
+            if row and row[0][0] is not None:
+                return row[0][0]
+        except Exception:
+            pass
+        return None
+
+    def add_member(self, fid : int, uid : int, role : int = 0):
+        self.execute(
+            "INSERT OR REPLACE INTO forum_members (fid, uid, role, join_time) VALUES (?, ?, ?, ?)",
+            (fid, uid, role, time())
+        )
+        return True
+
+    def remove_member(self, fid : int, uid : int):
+        self.execute(
+            "DELETE FROM forum_members WHERE fid = ? AND uid = ?", (fid, uid)
+        )
+        return True
+
+    def change_member_role(self, fid : int, uid : int, role : int):
+        self.execute(
+            "UPDATE forum_members SET role = ? WHERE fid = ? AND uid = ?",
+            (role, fid, uid)
+        )
+        return True
+
+    def list_members(self, fid : int):
+        return self.query(
+            "SELECT fid, uid, role, join_time FROM forum_members WHERE fid = ? ORDER BY role DESC",
+            (fid,)
+        )
+
+    def get_member_role(self, fid : int, uid : int):
+        row = self.query(
+            "SELECT role FROM forum_members WHERE fid = ? AND uid = ?", (fid, uid)
+        )
+        if row:
+            return row[0][0]
+        return None
+
+    def is_member(self, fid : int, uid : int):
+        return self.get_member_role(fid, uid) is not None
+
     def delete_forum(self, fid : int):
         self.execute("DELETE FROM forums WHERE fid = ?", (fid, ))
+        self.execute("DELETE FROM forum_members WHERE fid = ?", (fid, ))
         self.execute("DROP TABLE IF EXISTS F{}".format(fid))
         update_comments(self.api_pt, lambda comments: comments.pop(str(fid), None))
 
@@ -170,11 +247,13 @@ class ForumDb(Db):
         uid = int(uid)
         with self.lock:
             def operation():
+                self.cursor.execute("DELETE FROM forum_members WHERE uid = ?", (uid,))
                 self.cursor.execute("SELECT fid FROM forums WHERE creater = ?", (uid,))
                 deleted_forums = [row[0] for row in self.cursor.fetchall()]
 
                 for fid in deleted_forums:
                     self.cursor.execute("DELETE FROM forums WHERE fid = ?", (fid,))
+                    self.cursor.execute("DELETE FROM forum_members WHERE fid = ?", (fid,))
                     self.cursor.execute("DROP TABLE IF EXISTS F{}".format(fid))
 
                 self.cursor.execute("SELECT fid FROM forums")
