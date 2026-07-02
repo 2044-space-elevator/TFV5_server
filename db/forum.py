@@ -46,12 +46,22 @@ class ForumDb(Db):
         fid INTEGER UNIQUE NOT NULL,
         forumname TEXT NOT NULL,
         creater INTEGER,
-        create_time TEXT REAL,
+        create_time REAL,
         introduction TEXT,
         post_num INTEGER
+    )"""
+        cmd2 = """
+    CREATE TABLE IF NOT EXISTS contents (
+        fid INTEGER NOT NULL, 
+        pid INTEGER UNIQUE NOT NULL,
+        title TEXT,
+        creater INTEGER NOT NULL,
+        content TEXT,
+        send_time REAL
     )
     """
         self.execute(cmd)
+        self.execute(cmd2)
     
     def create_forum(self, forumname, creater : int, introduction):
         """
@@ -61,16 +71,6 @@ class ForumDb(Db):
         :param creater: 创建者（uid）
         :param introduction: 论坛简介
         """
-        cmd = """
-    CREATE TABLE IF NOT EXISTS F{} (
-        pid INTEGER UNIQUE NOT NULL,
-        title TEXT,
-        creater INTEGER NOT NULL,
-        content TEXT,
-        send_time TEXT REAL
-    )  
-    """
-
         def insert_forum():
             self.cursor.execute("SELECT MAX(fid) from forums")
             fid = self.cursor.fetchone()[0]
@@ -82,7 +82,6 @@ class ForumDb(Db):
                 "INSERT INTO forums (fid, forumname, creater, create_time, introduction, post_num) VALUES (?, ?, ?, ?, ?, 0)",
                 (fid, forumname, creater, time(), introduction)
             )
-            self.cursor.execute(cmd.format(fid))
             self.conn.commit()
             return fid
 
@@ -102,19 +101,19 @@ class ForumDb(Db):
         return self.query("SELECT * FROM forums WHERE creater = ?", (creater,))
     
     def query_post_pid(self, fid : int, pid : int):
-        return self.query("SELECT * FROM F{} WHERE pid = ?".format(fid), (pid,))
+        return self.query("SELECT * FROM contents WHERE pid = ? and fid = ?", (pid, fid))
     
     def query_post_title(self, fid : int, title : str):
-        return self.query("SELECT * FROM F{} WHERE title LIKE ?".format(fid), ('%' + title + '%',))
+        return self.query("SELECT * FROM contents WHERE fid = ? and title LIKE ?", (fid, '%' + title + '%',))
     
     def query_post_content(self, fid : int, content : str):
-        return self.query("SELECT * FROM F{} WHERE content LIKE ?".format(fid), ('%' + content + '%', ))
+        return self.query("SELECT * FROM contents WHERE fid = ? and content LIKE ?", (fid, '%' + content + '%', ))
     
     def query_post_sender(self, fid : int, sender : int):
-        return self.query("SELECT * FROM F{} WHERE creater = ?".format(fid), (sender, ))
+        return self.query("SELECT * FROM contents WHERE fid = ? and creater = ?", (fid, sender, ))
     
     def query_all_post(self, fid):
-        return self.query("SELECT * FROM F{}".format(fid))
+        return self.query("SELECT * FROM contents WHERE fid = ?", (fid, ))
     
     def query_all_forums(self):
         return self.query("SELECT * FROM forums ORDER BY post_num DESC")
@@ -123,15 +122,15 @@ class ForumDb(Db):
         if len(title) > 30:
             return False
         def insert_post():
-            self.cursor.execute("SELECT MAX(pid) from F{}".format(fid))
+            self.cursor.execute("SELECT MAX(pid) from contents")
             pid = self.cursor.fetchone()[0]
             if pid == None:
                 pid = 0
             else:
                 pid += 1
             self.cursor.execute(
-                "INSERT INTO F{} (pid, title, creater, content, send_time) VALUES (?, ?, ?, ?, ?)".format(fid),
-                (pid, title, sender, content, time())
+                "INSERT INTO contents (fid, pid, title, creater, content, send_time) VALUES (?, ?, ?, ?, ?, ?)",
+                (fid, pid, title, sender, content, time())
             )
             self.cursor.execute("UPDATE forums set post_num = post_num + 1 where fid = ?", (fid,))
             self.conn.commit()
@@ -148,13 +147,13 @@ class ForumDb(Db):
     
     def delete_forum(self, fid : int):
         self.execute("DELETE FROM forums WHERE fid = ?", (fid, ))
-        self.execute("DROP TABLE IF EXISTS F{}".format(fid))
+        self.execute("DELETE FROM contents WHERE fid = ?", (fid, ))
         update_comments(self.api_pt, lambda comments: comments.pop(str(fid), None))
 
     def delete_post(self, fid : int, pid : int):
         if not self.query_post_pid(fid, pid):
             return
-        self.execute("DELETE FROM F{} where pid = ?".format(fid), (pid,))
+        self.execute("DELETE FROM contents where pid = ?", (pid,))
         self.execute(
             "UPDATE forums set post_num = CASE WHEN post_num > 0 THEN post_num - 1 ELSE 0 END where fid = ?",
             (fid,)
@@ -175,20 +174,20 @@ class ForumDb(Db):
 
                 for fid in deleted_forums:
                     self.cursor.execute("DELETE FROM forums WHERE fid = ?", (fid,))
-                    self.cursor.execute("DROP TABLE IF EXISTS F{}".format(fid))
+                    self.cursor.execute("DELETE FROM contents WHERE fid = ?", (fid, ))
 
                 self.cursor.execute("SELECT fid FROM forums")
                 remaining_forums = [row[0] for row in self.cursor.fetchall()]
                 deleted_posts = {}
 
                 for fid in remaining_forums:
-                    self.cursor.execute("SELECT pid FROM F{} WHERE creater = ?".format(fid), (uid,))
+                    self.cursor.execute("SELECT pid FROM contents WHERE creater = ? and fid = ?", (uid, fid))
                     post_ids = [row[0] for row in self.cursor.fetchall()]
                     if not post_ids:
                         continue
 
                     deleted_posts[fid] = post_ids
-                    self.cursor.execute("DELETE FROM F{} WHERE creater = ?".format(fid), (uid,))
+                    self.cursor.execute("DELETE FROM contents WHERE creater = ? and fid = ?", (uid, fid))
                     self.cursor.execute(
                         "UPDATE forums SET post_num = CASE WHEN post_num >= ? THEN post_num - ? ELSE 0 END WHERE fid = ?",
                         (len(post_ids), len(post_ids), fid),
