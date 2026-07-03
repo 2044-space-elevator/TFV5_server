@@ -44,11 +44,12 @@ TFV5 的通知系统由两部分组成：
 - `forum.comment.mentioned`
 - `announcement.created`
 - `announcement.edited`
-- `announcement.deleted`
 - `group.admin.added`
 - `group.member.removed`
 - `group.admin.removed`
 - `group.deleted`
+- `message.plain`
+- `message.file`
 
 ## Secret API
 
@@ -179,3 +180,63 @@ ws://<server_host>:<port_tcp>
 ```
 
 客户端收到 `NOTIFICATION.NEW` 后，可以直接展示，也可以用其中的 `time_stamp` 配合 `query_after` 或 `delete_before` 做本地同步与清理。
+
+#### 接受文本信息
+
+
+**在 <info> 中**，有：
+```json
+{
+    "event" : "message.plain",
+    "title" : <this_mid>,
+    "content" : <content>,
+    "sender" : <uid>,
+    "meta" : <quote_mid>
+}
+```
+
+各参数含义请见“客户端发送的”。
+
+**且，如果聊天对象是群聊，那么 `<uid>` 是：`G<Gid>U<Uid>`，比如群编号 0 以及用户编号也是 0，那么 `<uid> 即为 `G0U0`。如果聊天对象是用户，那么 `<uid> 是用户编号。**
+
+### 客户端发送的
+
+需注意，发送信息时，如果发送成功那么服务器会再
+
+鉴于大部分功能已经被 API 统一处理，为了加快线上沟通效率，TFV5 在 WebSocket 接口中允许客户端发送一对一通讯信息（即好友快速通讯和群聊快速通讯）。
+
+允许发送文件和纯文本，可以带一个引用，引用的为 message id（message id 将在 notification 中被提供）。对于文本类型格式如下（封装格式参考 secret 类型）：
+
+```json
+{
+    "type" : "message.plain",
+    "content" : {
+        "send_to" : <id>,
+        "plain" : <content>,
+        "quote" : <mid>
+    }
+}
+```
+
+其中 `<id>` 是**字符串**，对于该字符串：
+- 如果是发给用户的，请注明 "U<Uid>"，<Uid> 是用户编码。（例如 "U0"）
+- 如果是发到群聊的，请注明 "G<Gid>"，<Gid> 是群聊编码。
+
+如果不引用，`<mid>` 为 -1。
+
+文件格式如下：
+
+```json
+{
+    "type" : "message.file",
+    "content" : {
+        "send_to" : <id>,
+        "file_hashes" : <hashes>,
+        "quote" : <mid>
+    }
+}
+```
+
+`<hashes>` 是文件的“取件码”，在上传文件的时候由 API 返回。
+
+`<mid>`、`<id>` 的说明如上。

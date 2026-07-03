@@ -1,4 +1,5 @@
 import websockets
+import time
 from argon2 import PasswordHasher
 import db
 import json
@@ -123,9 +124,34 @@ class InstantConnect():
 
         try:
             async for message in websocket:
-                print("Receive message", message)
+                message = json.loads(message)
+                message = json.loads(crypto.aes_decrypt(base64.b64decode(message['iv']), base64.b64decode(message['content']), self.aes_key[websocket]))
+                if message['type'] == "message.plain":
+                    content = message['content']
+                    plain = content['plain']
+                    send_to = content['send_to']
+                    quote = content['quote']
+                    send_time = time.time()
+                    notfic_dict = {
+                        "time_stamp" : send_time,
+                        "event" : "message.plain",
+                        "title" : send_time,
+                        "content" : plain,
+                        "sender" : self.clients_belonged[websocket],
+                        "meta" : quote
+                    }
+                    if not isinstance(quote, int) and isinstance(plain, str) and isinstance(send_to, str):
+                        continue
+                    if send_to[0] == 'U':
+                        # 发送给用户
+                        send_to = int(send_to[1:])
+                        if user_cursor.query_relationship(self.clients_belonged[websocket], send_to):
+                            self.notify_user(send_to, notfic_dict)
+                            self.notify_user(self.clients_belonged[websocket], notfic_dict)
+                    
         except websockets.exceptions.ConnectionClosed:
             pass
+
         finally:
             send_task.cancel()
             self._cleanup_client(websocket)

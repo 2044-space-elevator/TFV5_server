@@ -1187,8 +1187,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         max_file_size = read_config().get("max_file_size", -1)
         if max_file_size != -1 and len(base64.b64decode(file_b64)) > max_file_size:
             return bool_res()[False]
-        file.upload_file(port_api, uid, file_b64, filename, file_cursor)
-        return bool_res()[True]
+        hashes = file.upload_file(port_api, uid, file_b64, filename, file_cursor)
+        return hashes 
 
     @app.route('/file/get_file_info/<hashes>')
     def get_file_info(hashes):
