@@ -1036,7 +1036,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         password = req["password"]
         fid = req["fid"]
         if not isinstance(fid, int):
-            return {}
+            return bool_res()[False]
         title = req["title"]
         content = req["content"]
         if not user_cursor.verify_user(uid, password):
