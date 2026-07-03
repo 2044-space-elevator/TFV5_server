@@ -16,8 +16,8 @@ def sha256(data : str | bytes) -> str:
 def init(port_api : int):
     if not os.path.exists("res/{}/file".format(port_api)):
         os.makedirs("res/{}/file".format(port_api))
-    forum_cursor = FileDb("res/{}/file/file.db".format(port_api), port_api)
-    forum_cursor.create_file_db()
+    file_cursor = FileDb("res/{}/file/file.db".format(port_api), port_api)
+    file_cursor.create_file_db()
 
 
 def file_path(port_api : int, hashes : str):

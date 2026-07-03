@@ -210,6 +210,11 @@ def main(args=None):
     global FLASK_APP
     global ENABLE_DEBUG
     global ENABLE_WERKZEUG_LOG
+    global FORUM_CURSOR
+    global FILE_CURSOR
+    global NOTIFICATION_CURSOR
+    global GROUP_CURSOR
+    
 
     if args is None:
         args = parse_args([])
@@ -303,6 +308,11 @@ if __name__ == '__main__':
             TCP_THREAD = threading.Thread(target=tcp_thread, name="tfv5-tcp-server")
             TCP_THREAD.start()
     except Exception as e:
+        FILE_CURSOR.conn.close()
+        USER_CURSOR.conn.close()
+        FORUM_CURSOR.conn.close()
+        GROUP_CURSOR.conn.close()
+        NOTIFICATION_CURSOR.conn.close()
         prt(e, "red")
         prt("运行或操作错误，程序终止", "red")
         exit()
