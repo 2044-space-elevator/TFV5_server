@@ -8,7 +8,7 @@ import asyncio
 import base64
 
 class InstantConnect():
-    def __init__(self, port_api, port_tcp, notifiaction_cursor, user_cursor):
+    def __init__(self, port_api, port_tcp, notifiaction_cursor, user_cursor, group_cursor):
         self.port_api = port_api
         self.port_tcp = port_tcp
         self.notification_cursor = notifiaction_cursor
@@ -17,6 +17,7 @@ class InstantConnect():
         self.clients_belonged = dict()
         self.send_queue = dict()
         self.user_cursor = user_cursor
+        self.group_cursor = group_cursor
         self.aes_key = dict() 
         self.pri_key = crypto.load_pri("res/{}/secret/pri.pem".format(port_api))
         self.loop = None
@@ -131,25 +132,70 @@ class InstantConnect():
                     plain = content['plain']
                     send_to = content['send_to']
                     quote = content['quote']
-                    send_time = time.time()
+                    if quote < -1:
+                        continue
+                    send_time = str(time.time())
                     notfic_dict = {
                         "time_stamp" : send_time,
-                        "event" : "message.plain",
-                        "title" : send_time,
-                        "content" : plain,
-                        "sender" : self.clients_belonged[websocket],
-                        "meta" : quote
+                        "info" : {
+                            "event" : "message.plain",
+                            "title" : send_time,
+                            "content" : plain,
+                            "sender" : None,
+                            "meta" : quote
+                        }
                     }
-                    if not isinstance(quote, int) and isinstance(plain, str) and isinstance(send_to, str):
-                        continue
                     if send_to[0] == 'U':
                         # 发送给用户
                         send_to = int(send_to[1:])
-                        if user_cursor.query_relationship(self.clients_belonged[websocket], send_to):
+                        notfic_dict["sender"] = "U{}".format(self.clients_belonged[websocket])
+                        if self.user_cursor.query_relationship(self.clients_belonged[websocket], send_to):
                             self.notify_user(send_to, notfic_dict)
                             self.notify_user(self.clients_belonged[websocket], notfic_dict)
-                    
-        except websockets.exceptions.ConnectionClosed:
+                            
+                    elif send_to[0] == 'G':
+                        send_to = int(send_to[1:])
+                        members = list(self.group_cursor.query_gid(send_to)[3])
+                        notfic_dict["sender"] = "G{}U{}".format(send_to, self.clients_belonged[websocket])
+                        if not self.clients_belonged[websocket] in members:
+                            continue;
+                        for user in members:
+                            self.notify_user(user, notfic_dict)
+                
+                elif message["type"] == "message.file":
+                    content = message['content']
+                    file_hashes = message['file_hashes']
+                    send_to = content['send_to']
+                    quote = content['quote']
+                    if quote < -1:
+                        continue
+                    send_time = str(time.time())
+                    notfic_dict = {
+                        "time_stamp" : send_time,
+                        "event" : "message.file",
+                        "title" : send_time,
+                        "content" : file_hashes,
+                        "sender" : None,
+                        "meta" : quote
+                    }
+                    if send_to[0] == 'U':
+                        # 发送给用户
+                        send_to = int(send_to[1:])
+                        notfic_dict["sender"] = "U{}".format(self.clients_belonged[websocket])
+                        if self.user_cursor.query_relationship(self.clients_belonged[websocket], send_to):
+                            self.notify_user(send_to, notfic_dict)
+                            self.notify_user(self.clients_belonged[websocket], notfic_dict)
+                            
+                    elif send_to[0] == 'G':
+                        send_to = int(send_to[1:])
+                        members = list(self.group_cursor.query_gid(send_to)[3])
+                        notfic_dict["sender"] = "G{}U{}".format(send_to, self.clients_belonged[websocket])
+                        if not self.clients_belonged[websocket] in members:
+                            continue;
+                        for user in members:
+                            self.notify_user(user, notfic_dict)
+
+        except Exception:
             pass
 
         finally:
@@ -158,6 +204,7 @@ class InstantConnect():
             
 
     async def main(self):
+        print("[INFO] 已严肃启动 TCP 服务器")
         self.loop = asyncio.get_running_loop()
         async with websockets.serve(self.handler, "0.0.0.0", self.port_tcp):
             await asyncio.Future() 
@@ -172,5 +219,6 @@ if __name__ == '__main__':
     )
     user_cursor = db.UserDb(hasher, 'res/7001/db/user.db', 7001, 1145)
     notification_cursor = db.NotificationsDb('res/7001/db/notification.db', 7001)
-    example = InstantConnect(7001, 1145, notification_cursor, user_cursor)
+    group_cursor = db.GroupDb('res/7001/db/group.db', 7001)
+    example = InstantConnect(7001, 1145, notification_cursor, user_cursor, group_cursor)
     asyncio.run(example.main())

@@ -282,7 +282,7 @@ def main(args=None):
     FILE_CURSOR = db.FileDb("res/{}/file/file.db".format(PORT_API), PORT_API)
     NOTIFICATION_CURSOR = db.NotificationsDb("res/{}/db/notification.db".format(PORT_API), PORT_API)
     GROUP_CURSOR = db.GroupDb("res/{}/db/group.db".format(PORT_API), PORT_API)
-    INSTANT_CONTACT = InstantConnect(PORT_API, PORT_TCP, NOTIFICATION_CURSOR, USER_CURSOR)
+    INSTANT_CONTACT = InstantConnect(PORT_API, PORT_TCP, NOTIFICATION_CURSOR, USER_CURSOR, GROUP_CURSOR)
     FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR, FILE_CURSOR, NOTIFICATION_CURSOR, GROUP_CURSOR, INSTANT_CONTACT)
     start_api = args.start_api
     if not args.cli_mode:
@@ -305,8 +305,9 @@ if __name__ == '__main__':
         if FLASK_THREAD:
             FLASK_THREAD.start()
         if INSTANT_CONTACT:
-            TCP_THREAD = threading.Thread(target=tcp_thread, name="tfv5-tcp-server")
-            TCP_THREAD.start()
+            # TCP_THREAD = threading.Thread(target=tcp_thread, name="tfv5-tcp-server")
+            # TCP_THREAD.start()
+            asyncio.run(INSTANT_CONTACT.main())
     except Exception as e:
         FILE_CURSOR.conn.close()
         USER_CURSOR.conn.close()
