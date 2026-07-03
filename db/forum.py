@@ -86,6 +86,11 @@ class ForumDb(Db):
         :param creater: 创建者（uid）
         :param introduction: 论坛简介
         """
+        cmd = """
+    CREATE TABLE IF NOT EXISTS F{} (
+        time_stamp REAL,
+        content TEXT
+    )"""
         def insert_forum():
             self.cursor.execute("SELECT MAX(fid) from forums")
             fid = self.cursor.fetchone()[0]
