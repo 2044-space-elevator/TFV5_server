@@ -2,6 +2,8 @@ from flask import Flask, send_file, request as flask_request
 import json
 import register_tool
 import base64
+import binascii
+import os
 from db import *
 import avatar
 import file
@@ -116,6 +118,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             "groups_limit" : cfg.get("groups_limit", 30),
             "single_group_max_people" : cfg.get("single_group_max_people", 200),
             "max_file_size" : cfg.get("max_file_size", -1),
+            "max_avatar_size" : cfg.get("max_avatar_size", cfg.get("max_file_size", -1)),
             "email_activate" : bool(cfg.get("email_activate")),
             "default_asset_urls" : {
                 "logo" : "/avatar/get_logo",
@@ -152,6 +155,80 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if lowered in {"0", "false", "no", "n", "off", ""}:
                 return False
         return False
+
+    def decode_base64_payload(payload):
+        if not isinstance(payload, str) or not payload.strip():
+            return None
+        try:
+            return base64.b64decode(payload, validate=True)
+        except (binascii.Error, ValueError, TypeError):
+            return None
+
+    def read_upload_limit(cfg, specific_key=None):
+        if specific_key is not None and specific_key in cfg:
+            raw_value = cfg.get(specific_key)
+        else:
+            raw_value = cfg.get("max_file_size", -1)
+        try:
+            return parse_int_setting(raw_value, minimum=0, allow_unlimited=True)
+        except (TypeError, ValueError):
+            return -1
+
+    def normalize_upload_filename(filename):
+        if not isinstance(filename, str):
+            return None
+        filename = filename.strip()
+        if not filename or filename in {".", ".."} or "\x00" in filename:
+            return None
+        if "/" in filename or "\\" in filename:
+            return None
+        return filename
+
+    def read_allowed_file_extensions(cfg):
+        raw_value = cfg.get("allowed_file_extensions")
+        if raw_value is None:
+            return None
+        if isinstance(raw_value, str):
+            raw_items = raw_value.split(',')
+        elif isinstance(raw_value, list):
+            raw_items = raw_value
+        else:
+            return None
+        normalized = set()
+        for item in raw_items:
+            ext = str(item).strip().lower()
+            if not ext:
+                continue
+            if not ext.startswith('.'):
+                ext = ".{}".format(ext)
+            normalized.add(ext)
+        return normalized or None
+
+    def validate_avatar_upload(pic_b64, cfg):
+        payload = decode_base64_payload(pic_b64)
+        if payload is None:
+            return False
+        max_avatar_size = read_upload_limit(cfg, "max_avatar_size")
+        if max_avatar_size != -1 and len(payload) > max_avatar_size:
+            return False
+        return True
+
+    def validate_file_upload(filename, file_b64, cfg):
+        normalized_name = normalize_upload_filename(filename)
+        if normalized_name is None:
+            return None
+        payload = decode_base64_payload(file_b64)
+        if payload is None:
+            return None
+        max_file_size = read_upload_limit(cfg, "max_file_size")
+        if max_file_size != -1 and len(payload) > max_file_size:
+            return None
+        allowed_extensions = read_allowed_file_extensions(cfg)
+        if allowed_extensions:
+            _, ext = os.path.splitext(normalized_name.lower())
+            if not ext or ext not in allowed_extensions:
+                return None
+        return normalized_name
 
     def serialize_user_summary(row):
         return {
@@ -792,6 +869,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if "max_file_size" in req:
                 updates["max_file_size"] = parse_int_setting(req["max_file_size"], minimum=0, allow_unlimited=True)
 
+            if "max_avatar_size" in req:
+                updates["max_avatar_size"] = parse_int_setting(req["max_avatar_size"], minimum=0, allow_unlimited=True)
+
             if not updates:
                 return bool_res()[False]
 
@@ -900,12 +980,22 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if str(qid) not in queue:
                 return bool_res()[False]
             fchosen = queue[str(qid)]
-            fid = forum_cursor.create_forum(fchosen["forumname"], fchosen["creater"], fchosen["introduction"]) 
+            entry_type = fchosen.get("type", "create")
+            if entry_type == "edit":
+                edit_fid = fchosen["fid"]
+                forum_cursor.execute(
+                    "UPDATE forums SET forumname = ?, introduction = ? WHERE fid = ?",
+                    (fchosen["forumname"], fchosen["introduction"], edit_fid)
+                )
+                fid = edit_fid
+            else:
+                fid = forum_cursor.create_forum(fchosen["forumname"], fchosen["creater"], fchosen["introduction"])
             del queue[str(qid)]
             queue["queue_num"] = max(queue["queue_num"] - 1, 0)
             with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
                 json.dump(queue, file)
-        notify_user(fchosen["creater"], "forum.approved", "论坛已通过审核", "你创建的论坛 {} 已通过审核。".format(fchosen["forumname"]), sender=uid, meta={"fid" : fid, "forum_name" : fchosen["forumname"]})
+        action_text = "编辑" if entry_type == "edit" else "创建"
+        notify_user(fchosen["creater"], "forum.approved", "论坛已通过审核", "你{}的论坛 {} 已通过审核。".format(action_text, fchosen["forumname"]), sender=uid, meta={"fid" : fid, "forum_name" : fchosen["forumname"]})
         return bool_res()[True]
 
     @api("/forum/reject_forum", methods=["POST"])
@@ -964,7 +1054,13 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not fid.isdigit():
             return {}
         try:
-            return forum_cursor.query_all_post(int(fid))
+            fid_int = int(fid)
+            posts = forum_cursor.query_all_post(fid_int)
+            try:
+                pinned_pid = forum_cursor.get_pinned_pid(fid_int)
+            except Exception:
+                pinned_pid = None
+            return json.dumps({"posts": posts, "pinned_pid": pinned_pid})
         except OperationalError as e:
             return {}
     
@@ -989,6 +1085,42 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         forum_cursor.delete_forum(fid)
         return bool_res()[True]
     
+    @api("/forum/edit_forum", methods=["POST"])
+    def forum_edit_forum(req):
+        """Submit forum edit to approval queue. Owner or admin/root only."""
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        forum_info = query_forum(fid)
+        if not forum_info:
+            return bool_res()[False]
+        creater = forum_info[0][2]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if not (user_stat in ["admin", "root"] or uid == creater):
+            return bool_res()[False]
+        forum_name = req.get("forum_name", forum_info[0][1])
+        introduction = req.get("introduction", forum_info[0][4] or "")
+        with locks['queue']:
+            with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
+                queue = json.load(file)
+            qid = queue['queue_num'] + 1
+            queue["queue_num"] = qid
+            for i in queue.keys():
+                if i.isdigit():
+                    qid = max(qid, int(i) + 1)
+            queue[qid] = {
+                "type" : "edit",
+                "fid" : fid,
+                "creater" : uid,
+                "forumname" : forum_name,
+                "introduction" : introduction
+            }
+            with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
+                json.dump(queue, file)
+        return bool_res()[True]
+
     @api("/forum/remove_post", methods=['POST'])
     def remove_post(req):
         uid = req["uid"]
@@ -1008,6 +1140,144 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         forum_cursor.delete_post(fid, pid)
         return bool_res()[True]
+
+    @api("/forum/pin_post", methods=["POST"])
+    def pin_post(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        pid = req["pid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        forum_info = query_forum(fid)
+        if not forum_info:
+            return bool_res()[False]
+        creater = forum_info[0][2]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if not (user_stat in ["admin", "root"] or uid == creater):
+            return bool_res()[False]
+        return bool_res()[forum_cursor.pin_post(fid, pid)]
+
+    @api("/forum/unpin_post", methods=["POST"])
+    def unpin_post(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        forum_info = query_forum(fid)
+        if not forum_info:
+            return bool_res()[False]
+        creater = forum_info[0][2]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if not (user_stat in ["admin", "root"] or uid == creater):
+            return bool_res()[False]
+        return bool_res()[forum_cursor.unpin_post(fid)]
+
+    @api("/forum/members", methods=["POST"])
+    def forum_member_list(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        forum_info = query_forum(fid)
+        if not forum_info:
+            return bool_res()[False]
+        operator_role = forum_cursor.get_member_role(fid, uid)
+        if operator_role is None or operator_role < 50:
+            return bool_res()[False]
+        rows = forum_cursor.list_members(fid)
+        return json.dumps([list(row) for row in rows])
+
+    @api("/forum/add_member", methods=["POST"])
+    def forum_add_member(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        target_uid = req["target_uid"]
+        role = req.get("role", 0)
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        operator_role = forum_cursor.get_member_role(fid, uid)
+        if operator_role is None or operator_role < 50:
+            return bool_res()[False]
+        if not user_cursor.uid_query(target_uid):
+            return bool_res()[False]
+        return bool_res()[forum_cursor.add_member(fid, target_uid, role)]
+
+    @api("/forum/remove_member", methods=["POST"])
+    def forum_remove_member(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        target_uid = req["target_uid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        operator_role = forum_cursor.get_member_role(fid, uid)
+        if operator_role is None or operator_role < 50:
+            return bool_res()[False]
+        target_role = forum_cursor.get_member_role(fid, target_uid)
+        if target_role is not None and target_role >= operator_role:
+            return bool_res()[False]
+        return bool_res()[forum_cursor.remove_member(fid, target_uid)]
+
+    @api("/forum/change_member_role", methods=["POST"])
+    def forum_change_member_role(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        target_uid = req["target_uid"]
+        new_role = req["new_role"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        operator_role = forum_cursor.get_member_role(fid, uid)
+        if operator_role is None or operator_role < 50:
+            return bool_res()[False]
+        if operator_role <= new_role and operator_role < 100:
+            return bool_res()[False]
+        return bool_res()[forum_cursor.change_member_role(fid, target_uid, new_role)]
+
+    @api("/forum/join", methods=["POST"])
+    def forum_join(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
+        if not query_forum(fid):
+            return bool_res()[False]
+        if forum_cursor.is_member(fid, uid):
+            return bool_res()[False]
+        return bool_res()[forum_cursor.add_member(fid, uid, 0)]
+
+    @api("/forum/leave", methods=["POST"])
+    def forum_leave(req):
+        uid = req["uid"]
+        password = req["password"]
+        fid = req["fid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        current_role = forum_cursor.get_member_role(fid, uid)
+        if current_role is None:
+            return bool_res()[False]
+        if current_role >= 100:
+            return bool_res()[False]  # owner cannot leave, must delete forum
+        return bool_res()[forum_cursor.remove_member(fid, uid)]
+
+    @api("/forum/my_memberships", methods=["POST"])
+    def forum_my_memberships(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        rows = forum_cursor.query(
+            "SELECT fid, role FROM forum_members WHERE uid = ?", (uid,)
+        )
+        return json.dumps([list(row) for row in rows])
 
     @api("/forum/comment", methods=["POST"])
     def comment(req):
@@ -1125,9 +1395,14 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         forum_info = query_forum(fid)
         if not forum_info:
             return bool_res()[False]
+        if not validate_avatar_upload(pic_b64, read_config()):
+            return bool_res()[False]
         creater = forum_info[0][2]
         if uid == creater or user_stat in ['admin', 'root']:
-            avatar.upload_avatar(port_api, fid, pic_b64, 'forum')
+            try:
+                avatar.upload_avatar(port_api, fid, pic_b64, 'forum')
+            except Exception:
+                return bool_res()[False]
             return bool_res()[True]
         return bool_res()[False]
         
@@ -1138,7 +1413,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         pic_b64 = req["pic"]
-        avatar.upload_avatar(port_api, uid, pic_b64, 'user')
+        if not validate_avatar_upload(pic_b64, read_config()):
+            return bool_res()[False]
+        try:
+            avatar.upload_avatar(port_api, uid, pic_b64, 'user')
+        except Exception:
+            return bool_res()[False]
         return bool_res()[True]
     
     @api('/avatar/upload_group_avatar', methods=['POST'])
@@ -1159,6 +1439,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         if asset_type not in ["forum", "user", "group", "logo"]:
             return bool_res()[False]
+        if not validate_avatar_upload(pic_b64, read_config()):
+            return bool_res()[False]
         return bool_res()[avatar.upload_default_avatar(port_api, pic_b64, asset_type)]
     
     @api('/avatar/upload_logo', methods=['POST'])
@@ -1170,6 +1452,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not user_stat in ['admin', 'root']:
+            return bool_res()[False]
+        if not validate_avatar_upload(pic_b64, read_config()):
             return bool_res()[False]
         return bool_res()[avatar.upload_default_avatar(port_api, pic_b64, "logo")]
         
@@ -1184,31 +1468,59 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_cursor.uid_query(uid)[0][4]
         if user_stat == 'banned':
             return bool_res()[False]
-        max_file_size = read_config().get("max_file_size", -1)
-        if max_file_size != -1 and len(base64.b64decode(file_b64)) > max_file_size:
+        cfg = read_config()
+        normalized_name = validate_file_upload(filename, file_b64, cfg)
+        if normalized_name is None:
             return bool_res()[False]
-        hashes = file.upload_file(port_api, uid, file_b64, filename, file_cursor)
-        return hashes 
+        try:
+            hashes = file.upload_file(port_api, uid, file_b64, normalized_name, file_cursor)
+        except Exception:
+            return bool_res()[False]
+        return json.dumps({
+            "success" : True,
+            "result" : bool_res()[True],
+            "hash" : hashes,
+            "download_url" : "/file/get_file/{}".format(hashes),
+            "info_url" : "/file/get_file_info/{}".format(hashes)
+        }, ensure_ascii=False)
+
+    @api('/file/dereference_file', methods=['POST'])
+    def dereference_file(req):
+        uid = req["uid"]
+        password = req["password"]
+        hashes = req["hash"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        file.dereference_file(port_api, hashes, file_cursor)
+        return bool_res()[True]
 
     @app.route('/file/get_file_info/<hashes>')
     def get_file_info(hashes):
         qry = file_cursor.return_file(hashes)
         if not qry:
             return {}
-        qry = qry[0]
+        row = qry[0]
+        ref_count = row[5] if len(row) > 5 else 1
+        last_ref_time = row[6] if len(row) > 6 else row[2]
         return {
-            "sender" : qry[0],
-            "file_name" : qry[1],
-            "send_time" : qry[3],
-            "active" : qry[4]
+            "sender" : row[0],
+            "file_name" : row[1],
+            "send_time" : row[2],
+            "hash" : row[3],
+            "ref_count" : ref_count,
+            "last_ref_time" : last_ref_time
         }
     
     @app.route("/file/get_file/<hashes>")
     def get_file(hashes : str):
         qry = file_cursor.return_file(hashes)
-        if (not qry) or qry[0][4] == False:
-            return 
-        return send_file("res/{}/file/{}.file".format(port_api, hashes), download_name=qry[0][1], as_attachment=True)
+        if not qry:
+            return
+        row = qry[0]
+        active = row[5] > 0 if len(row) > 5 else row[4]
+        if not active:
+            return
+        return send_file("res/{}/file/{}.file".format(port_api, hashes), download_name=row[1], as_attachment=True)
     
     @api("/announcement/upload_announcement", methods=['POST'])
     def upload_announcement(req):
