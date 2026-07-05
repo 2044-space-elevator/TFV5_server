@@ -1,3 +1,4 @@
+from __future__ import annotations
 from db.tool import Db
 from crypto import sha256, pwd_verify
 import re

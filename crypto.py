@@ -1,3 +1,4 @@
+from __future__ import annotations
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from argon2.exceptions import VerifyMismatchError
 from cryptography.hazmat.primitives import hashes, serialization

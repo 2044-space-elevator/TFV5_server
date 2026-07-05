@@ -84,7 +84,7 @@ class InstantConnect():
         except (asyncio.CancelledError, websockets.exceptions.ConnectionClosed):
             pass
     
-    async def handler(self, websocket : websockets.ClientConnection):
+    async def handler(self, websocket : websockets.WebSocketServerProtocol):
         self.connected_clients[-1].append(websocket)
         self.clients_belonged[websocket] = -1
         try:
