@@ -1703,29 +1703,45 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     
     @api("/friend/add_friend", methods=['POST'])
     def add_friend(req):
-        """
-        TODO 
-        """
         uid = req["uid"]
         password = req["password"]
         added = req["added"]
         req_word = req["req_word"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-    
+        if not user_cursor.uid_query(added):
+            return bool_res()[False]
+        succeeded = user_cursor.pending_friend(uid, added, uid)
+        if succeeded:
+            notify_user(added, "friend.request", "新的好友申请",
+                        "用户 {} 请求添加你为好友。".format(uid), sender=uid)
+        return bool_res()[succeeded]
+
     @api("/friend/deal_ship", methods=['POST'])
     def deal_ship(req):
-        """
-        TODO 
-        """
         uid = req["uid"]
         password = req["password"]
         dealt = req["dealt"]
         stat = req["stat"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        if not stat in ["allow", "reject"]:
+        if stat not in ("allow", "reject"):
             return bool_res()[False]
+        relationship = user_cursor.query_relationship(uid, dealt)
+        if not relationship:
+            return bool_res()[False]
+        rel = relationship[0]
+        if rel[2] != 'pending' or rel[3] != dealt:
+            return bool_res()[False]
+        if stat == "allow":
+            succeeded = user_cursor.change_relationship(uid, dealt, 'friend')
+            if succeeded:
+                notify_user(dealt, "friend.accepted", "好友申请已通过",
+                            "用户 {} 已通过你的好友申请。".format(uid), sender=uid)
+        else:
+            user_cursor.delete_relationship(uid, dealt)
+            succeeded = True
+        return bool_res()[succeeded]
     
     return app
 
