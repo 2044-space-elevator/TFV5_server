@@ -26,14 +26,22 @@ def file_path(port_api : int, hashes : str):
 
 def upload_file(port_api : int, uid : int, file_b64 : str, file_name : str, file_cursor : FileDb):
     content = base64.b64decode(file_b64)
+    file_size = len(content)
     hashes = sha256(content)
-    existing = file_cursor.return_file(hashes)
-    if existing:
+
+    already_owned = file_cursor.has_active_user_file(uid, hashes)
+
+    if file_cursor.file_exists(hashes):
         file_cursor.increment_ref(hashes)
+        if not already_owned:
+            file_cursor.increment_upload_user_count(hashes)
     else:
         with open(file_path(port_api, hashes), "wb") as file:
             file.write(content)
-        file_cursor.tag_file(uid, file_name, time.time(), hashes)
+        file_cursor.tag_file(uid, file_name, time.time(), hashes, file_size)
+
+    file_cursor.add_user_file(uid, hashes, file_name, time.time())
+
     qry = file_cursor.lose_effect()
     for tmp in qry:
         tmp_path = file_path(port_api, tmp[3])
@@ -48,6 +56,15 @@ def dereference_file(port_api : int, hashes : str, file_cursor : FileDb):
         tmp_path = file_path(port_api, tmp[3])
         if os.path.isfile(tmp_path):
             os.remove(tmp_path)
+
+def delete_user_file(port_api : int, uid : int, hashes : str, file_cursor : FileDb):
+    file_cursor.deactivate_user_file(uid, hashes)
+    deleted = file_cursor.decrement_upload_user_count(hashes)
+    for row in deleted:
+        tmp_path = file_path(port_api, row[3])
+        if os.path.isfile(tmp_path):
+            os.remove(tmp_path)
+    return len(deleted) > 0
 
 def clean_user_files(port_api : int, uid : int, file_cursor : FileDb):
     rows = file_cursor.clean_sender_files(uid) or []

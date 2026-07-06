@@ -148,7 +148,8 @@ def create_new_server():
         "rate_limits" : {
             "default" : {"requests": 60, "range": 60}
         },
-        "max_file_size" : -1
+        "max_file_size" : -1,
+        "user_storage_quota" : -1
     }
     with open("res/{}/config.json".format(PORT_API), "w+") as file:
         json.dump(cfg, file) 
@@ -281,6 +282,7 @@ def main(args=None):
     FORUM_CURSOR = db.ForumDb("res/{}/db/forum.db".format(PORT_API), PORT_API, PORT_TCP)
     FORUM_CURSOR.create_forum_table()
     FILE_CURSOR = db.FileDb("res/{}/file/file.db".format(PORT_API), PORT_API)
+    FILE_CURSOR.create_file_db()
     NOTIFICATION_CURSOR = db.NotificationsDb("res/{}/db/notification.db".format(PORT_API), PORT_API)
     GROUP_CURSOR = db.GroupDb("res/{}/db/group.db".format(PORT_API), PORT_API)
     INSTANT_CONTACT = InstantConnect(PORT_API, PORT_TCP, NOTIFICATION_CURSOR, USER_CURSOR, GROUP_CURSOR)
