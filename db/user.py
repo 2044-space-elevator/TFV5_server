@@ -263,7 +263,6 @@ class UserDb(Db):
 
         if uida == uidb:
             return False
-            
         if self.query_relationship(uida, uidb):
             return False
 
@@ -272,7 +271,12 @@ class UserDb(Db):
 
         self.execute("INSERT INTO friendship (user1, user2, adder, blocked_by_user1, blocked_by_user2) VALUES (?, ?, ?, ?, ?)", (uida, uidb, adder, False, False))
         return True
-    
+
+    def delete_relationship(self, uida, uidb):
+        if uida > uidb:
+            uida, uidb = uidb, uida
+        self.execute("DELETE FROM friendship WHERE user1 = ? AND user2 = ?", (uida, uidb))
+
     def change_pwd(self, uid : int, new_pwd : str):
         pwd_hash = self.hasher.hash(new_pwd)
         self.execute("UPDATE users SET pwd_hash = ? where uid = ?", (pwd_hash, uid))

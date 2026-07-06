@@ -37,6 +37,8 @@ TFV5 的通知系统由两部分组成：
 
 当前内置事件类型有：
 
+- `friend.request`
+- `friend.accepted`
 - `auth.stat.changed`
 - `forum.approved`
 - `forum.rejected`

@@ -15,6 +15,7 @@
 - [auth.md](auth.md) 账号相关 API
 - [forum.md](forum.md) 论坛相关 API
 - [info.md](info.md) 服务器信息 API
+- [friend.md](friend.md) 好友相关 API
 - [notification.md](notification.md) 通知系统与实时推送 API
 
 ## 文档约定
