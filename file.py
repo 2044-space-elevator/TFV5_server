@@ -73,3 +73,9 @@ def clean_user_files(port_api : int, uid : int, file_cursor : FileDb):
         if os.path.isfile(target_path):
             os.remove(target_path)
     return rows
+
+def force_delete_file(port_api : int, hashes : str, file_cursor : FileDb):
+    file_cursor.force_delete_file(hashes)
+    target_path = file_path(port_api, hashes)
+    if os.path.isfile(target_path):
+        os.remove(target_path)
