@@ -6,21 +6,50 @@ import json
 import crypto
 import asyncio
 import base64
+import os
+import threading
+from collections import defaultdict
 
 class InstantConnect():
-    def __init__(self, port_api, port_tcp, notifiaction_cursor, user_cursor, group_cursor):
+    def __init__(self, port_api, port_tcp, notification_cursor, user_cursor, messages_cursor, group_cursor):
         self.port_api = port_api
         self.port_tcp = port_tcp
-        self.notification_cursor = notifiaction_cursor
+        self.notification_cursor = notification_cursor
         self.connected_clients = dict()
         self.connected_clients[-1] = []
         self.clients_belonged = dict()
         self.send_queue = dict()
         self.user_cursor = user_cursor
         self.group_cursor = group_cursor
-        self.aes_key = dict() 
+        self.messages_cursor = messages_cursor
+        self._load_config()
+        self.aes_key = dict()
         self.pri_key = crypto.load_pri("res/{}/secret/pri.pem".format(port_api))
         self.loop = None
+        self._ws_lock = threading.Lock()
+        self._ws_timestamps = defaultdict(list)
+        self._ws_typing_timestamps = defaultdict(list)
+        self._clients_lock = threading.Lock()
+
+    def _check_ws_rate(self, uid: int, max_per_second: int = 10, bucket: str = "msg") -> bool:
+        now = time.time()
+        ts_dict = self._ws_typing_timestamps if bucket == "typing" else self._ws_timestamps
+        with self._ws_lock:
+            cutoff = now - 1.0
+            ts_dict[uid] = [t for t in ts_dict[uid] if t > cutoff]
+            if len(ts_dict[uid]) >= max_per_second:
+                return False
+            ts_dict[uid].append(now)
+            return True
+
+    def _load_config(self):
+        cfg_path = os.path.join("res", str(self.port_api), "config.json")
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            self.max_message_length = cfg.get("max_message_length", 10000)
+        except Exception:
+            self.max_message_length = 10000
     
     def encrypt_response(self, req : dict, websocket):
         json_req = json.dumps(req)
@@ -29,15 +58,36 @@ class InstantConnect():
         content = base64.b64encode(content).decode('utf-8')
         return json.dumps({"iv" : iv, "content" : content}) 
 
+    def _verify_quote(self, quote_mid: int, send_to: str, sender_uid: int) -> bool:
+        rows = self.messages_cursor.query(
+            "SELECT sender_uid, receiver_uid, group_id, deleted FROM messages WHERE mid = ?",
+            (quote_mid,)
+        )
+        if not rows:
+            return False
+        r = rows[0]
+        if r[3]:  # deleted
+            return False
+        if send_to[0] == 'G':
+            gid = int(send_to[1:])
+            if r[2] != gid:
+                return False
+            return self.group_cursor.is_member(gid, sender_uid)
+        else:
+            target_uid = int(send_to[1:])
+            return (r[0] == sender_uid and r[1] == target_uid) or \
+                   (r[0] == target_uid and r[1] == sender_uid)
+
     def _cleanup_client(self, websocket):
-        uid = self.clients_belonged.pop(websocket, -1)
-        if uid in self.connected_clients and websocket in self.connected_clients[uid]:
-            self.connected_clients[uid].remove(websocket)
-            if uid != -1 and not self.connected_clients[uid]:
-                del self.connected_clients[uid]
-        elif websocket in self.connected_clients[-1]:
-            self.connected_clients[-1].remove(websocket)
-        self.send_queue.pop(websocket, None)
+        with self._clients_lock:
+            uid = self.clients_belonged.pop(websocket, -1)
+            if uid in self.connected_clients and websocket in self.connected_clients[uid]:
+                self.connected_clients[uid].remove(websocket)
+                if uid != -1 and not self.connected_clients[uid]:
+                    del self.connected_clients[uid]
+            elif websocket in self.connected_clients[-1]:
+                self.connected_clients[-1].remove(websocket)
+            self.send_queue.pop(websocket, None)
         self.aes_key.pop(websocket, None)
 
     async def _queue_message(self, websocket, message : dict):
@@ -45,8 +95,23 @@ class InstantConnect():
         if queue is not None:
             await queue.put(message)
 
+    async def _notify_user_async(self, uid : int, notification : dict):
+        return await asyncio.to_thread(self.notify_user, uid, notification)
+
+    def _queue_ack(self, websocket, client_mid=None, status="sent", mid=None, error=None):
+        if client_mid is None or websocket not in self.send_queue or self.loop is None:
+            return
+        ack = {"type": "message.ack", "client_mid": client_mid, "status": status}
+        if mid is not None:
+            ack["mid"] = mid
+        if error is not None:
+            ack["error"] = error
+        asyncio.run_coroutine_threadsafe(self.send_queue[websocket].put(ack), self.loop)
+
     async def _disconnect_user(self, uid : int):
-        for websocket in list(self.connected_clients.get(uid, [])):
+        with self._clients_lock:
+            clients = list(self.connected_clients.get(uid, []))
+        for websocket in clients:
             try:
                 await websocket.close()
             except Exception:
@@ -61,7 +126,9 @@ class InstantConnect():
         }
         if self.loop is None:
             return record
-        for websocket in list(self.connected_clients.get(uid, [])):
+        with self._clients_lock:
+            clients = list(self.connected_clients.get(uid, []))
+        for websocket in clients:
             asyncio.run_coroutine_threadsafe(
                 self._queue_message(websocket, {"type" : "NOTIFICATION.NEW", "notification" : record}),
                 self.loop
@@ -70,7 +137,9 @@ class InstantConnect():
 
     def disconnect_user(self, uid : int):
         if self.loop is None:
-            for websocket in list(self.connected_clients.get(uid, [])):
+            with self._clients_lock:
+                clients = list(self.connected_clients.get(uid, []))
+            for websocket in clients:
                 self._cleanup_client(websocket)
             return
 
@@ -85,8 +154,9 @@ class InstantConnect():
             pass
     
     async def handler(self, websocket : websockets.WebSocketServerProtocol):
-        self.connected_clients[-1].append(websocket)
-        self.clients_belonged[websocket] = -1
+        with self._clients_lock:
+            self.connected_clients[-1].append(websocket)
+            self.clients_belonged[websocket] = -1
         try:
             message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
             message = json.loads(message)
@@ -108,11 +178,12 @@ class InstantConnect():
                 raise
             if not self.user_cursor.verify_user(message['uid'], message['password']):
                 raise
-            self.connected_clients[-1].remove(websocket)
-            if not message["uid"] in self.connected_clients.keys():
-                self.connected_clients[message['uid']] = []
-            self.connected_clients[message['uid']].append(websocket)
-            self.clients_belonged[websocket] = message['uid']
+            with self._clients_lock:
+                self.connected_clients[-1].remove(websocket)
+                if not message["uid"] in self.connected_clients.keys():
+                    self.connected_clients[message['uid']] = []
+                self.connected_clients[message['uid']].append(websocket)
+                self.clients_belonged[websocket] = message['uid']
             self.send_queue[websocket] = asyncio.Queue()
             await websocket.send(self.encrypt_response({"type" : "AUTH.LOGIN_SUCCEEDED"}, websocket))
 
@@ -127,76 +198,246 @@ class InstantConnect():
             async for message in websocket:
                 message = json.loads(message)
                 message = json.loads(crypto.aes_decrypt(base64.b64decode(message['iv']), base64.b64decode(message['content']), self.aes_key[websocket]))
+                sender_uid = self.clients_belonged[websocket]
+
+                if message['type'] == 'PING':
+                    await self._queue_message(websocket, {"type": "PONG"})
+                    continue
+
+                if message['type'] in ("message.plain", "message.file"):
+                    info = self.user_cursor.uid_query(sender_uid)
+                    if not info or info[0][4] == 'banned':
+                        self._queue_ack(websocket, message.get('client_mid'), status="failed", error="banned")
+                        break
+
+                    if not self._check_ws_rate(sender_uid):
+                        self._queue_ack(websocket, message.get('client_mid'), status="failed", error="rate_limited")
+                        continue
                 if message['type'] == "message.plain":
                     content = message['content']
                     plain = content['plain']
                     send_to = content['send_to']
                     quote = content['quote']
+                    client_mid = message.get('client_mid')
                     if quote < -1:
+                        self._queue_ack(websocket, client_mid, status="failed", error="invalid_quote")
                         continue
-                    send_time = str(time.time())
-                    notfic_dict = {
-                        "time_stamp" : send_time,
-                        "info" : {
-                            "event" : "message.plain",
-                            "title" : send_time,
-                            "content" : plain,
-                            "sender" : None,
-                            "meta" : quote
-                        }
-                    }
+                    if quote >= 0 and not self._verify_quote(quote, send_to, self.clients_belonged[websocket]):
+                        self._queue_ack(websocket, client_mid, status="failed", error="invalid_quote")
+                        continue
+                    if len(plain) > self.max_message_length:
+                        self._queue_ack(websocket, client_mid, status="failed", error="message_too_long")
+                        continue
                     if send_to[0] == 'U':
                         # 发送给用户
                         send_to = int(send_to[1:])
-                        notfic_dict["sender"] = "U{}".format(self.clients_belonged[websocket])
-                        if self.user_cursor.query_relationship(self.clients_belonged[websocket], send_to):
-                            self.notify_user(send_to, notfic_dict)
-                            self.notify_user(self.clients_belonged[websocket], notfic_dict)
-                            
+                        sender_uid = self.clients_belonged[websocket]
+                        if not self.user_cursor.is_friend(sender_uid, send_to):
+                            self._queue_ack(websocket, client_mid, status="failed", error="not_friends")
+                            continue
+                        msg_record = self.messages_cursor.add_message(
+                            sender_uid, send_to, plain,
+                            content_type='plain', quote=quote,
+                            client_mid=client_mid
+                        )
+                        self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
+                        if msg_record.get("duplicate"):
+                            continue
+                        sender_str = "U{}".format(sender_uid)
+                        recv_notif = {
+                            "event" : "message.plain",
+                            "title" : str(msg_record["send_time"]),
+                            "content" : plain,
+                            "sender" : sender_str,
+                            "meta" : quote,
+                            "mid" : msg_record["mid"],
+                            "client_mid" : client_mid,
+                            "room_id" : sender_str
+                        }
+                        sender_notif = dict(recv_notif)
+                        sender_notif["room_id"] = "U{}".format(send_to)
+                        await self._notify_user_async(send_to, recv_notif)
+                        await self._notify_user_async(sender_uid, sender_notif)
+
                     elif send_to[0] == 'G':
-                        send_to = int(send_to[1:])
-                        members = list(self.group_cursor.query_gid(send_to)[3])
-                        notfic_dict["sender"] = "G{}U{}".format(send_to, self.clients_belonged[websocket])
+                        gid = int(send_to[1:])
+                        group = self.group_cursor.query_gid(gid)
+                        if not group:
+                            self._queue_ack(websocket, client_mid, status="failed", error="group_not_found")
+                            continue
+                        members = json.loads(group[0][3])
+                        sender_str = "G{}U{}".format(gid, self.clients_belonged[websocket])
                         if not self.clients_belonged[websocket] in members:
-                            continue;
+                            self._queue_ack(websocket, client_mid, status="failed", error="not_group_member")
+                            continue
+                        msg_record = self.messages_cursor.add_message(
+                            self.clients_belonged[websocket], 0, plain,
+                            content_type='plain', quote=quote, group_id=gid,
+                            client_mid=client_mid
+                        )
+                        self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
+                        if msg_record.get("duplicate"):
+                            continue
+                        notif_dict = {
+                            "event" : "message.plain",
+                            "title" : str(msg_record["send_time"]),
+                            "content" : plain,
+                            "sender" : sender_str,
+                            "meta" : quote,
+                            "mid" : msg_record["mid"],
+                            "client_mid" : client_mid,
+                            "room_id" : "G{}".format(gid),
+                            "group_id" : gid
+                        }
                         for user in members:
-                            self.notify_user(user, notfic_dict)
-                
+                            await self._notify_user_async(user, notif_dict)
+
+                    else:
+                        self._queue_ack(websocket, client_mid, status="failed", error="invalid_target")
+
                 elif message["type"] == "message.file":
                     content = message['content']
-                    file_hashes = message['file_hashes']
+                    file_hashes = content['file_hashes']
                     send_to = content['send_to']
                     quote = content['quote']
+                    client_mid = message.get('client_mid')
                     if quote < -1:
+                        self._queue_ack(websocket, client_mid, status="failed", error="invalid_quote")
                         continue
-                    send_time = str(time.time())
-                    notfic_dict = {
-                        "time_stamp" : send_time,
-                        "event" : "message.file",
-                        "title" : send_time,
-                        "content" : file_hashes,
-                        "sender" : None,
-                        "meta" : quote
-                    }
+                    if quote >= 0 and not self._verify_quote(quote, send_to, self.clients_belonged[websocket]):
+                        self._queue_ack(websocket, client_mid, status="failed", error="invalid_quote")
+                        continue
+                    if len(file_hashes) > self.max_message_length:
+                        self._queue_ack(websocket, client_mid, status="failed", error="message_too_long")
+                        continue
                     if send_to[0] == 'U':
                         # 发送给用户
                         send_to = int(send_to[1:])
-                        notfic_dict["sender"] = "U{}".format(self.clients_belonged[websocket])
-                        if self.user_cursor.query_relationship(self.clients_belonged[websocket], send_to):
-                            self.notify_user(send_to, notfic_dict)
-                            self.notify_user(self.clients_belonged[websocket], notfic_dict)
-                            
-                    elif send_to[0] == 'G':
-                        send_to = int(send_to[1:])
-                        members = list(self.group_cursor.query_gid(send_to)[3])
-                        notfic_dict["sender"] = "G{}U{}".format(send_to, self.clients_belonged[websocket])
-                        if not self.clients_belonged[websocket] in members:
-                            continue;
-                        for user in members:
-                            self.notify_user(user, notfic_dict)
+                        sender_uid = self.clients_belonged[websocket]
+                        if not self.user_cursor.is_friend(sender_uid, send_to):
+                            self._queue_ack(websocket, client_mid, status="failed", error="not_friends")
+                            continue
+                        msg_record = self.messages_cursor.add_message(
+                            sender_uid, send_to, file_hashes,
+                            content_type='file', file_hash=file_hashes, quote=quote,
+                            client_mid=client_mid
+                        )
+                        self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
+                        if msg_record.get("duplicate"):
+                            continue
+                        sender_str = "U{}".format(sender_uid)
+                        recv_notif = {
+                            "event" : "message.file",
+                            "title" : str(msg_record["send_time"]),
+                            "content" : file_hashes,
+                            "sender" : sender_str,
+                            "meta" : quote,
+                            "mid" : msg_record["mid"],
+                            "file_hash" : file_hashes,
+                            "client_mid" : client_mid,
+                            "room_id" : sender_str
+                        }
+                        sender_notif = dict(recv_notif)
+                        sender_notif["room_id"] = "U{}".format(send_to)
+                        await self._notify_user_async(send_to, recv_notif)
+                        await self._notify_user_async(sender_uid, sender_notif)
 
-        except Exception:
-            pass
+                    elif send_to[0] == 'G':
+                        gid = int(send_to[1:])
+                        group = self.group_cursor.query_gid(gid)
+                        if not group:
+                            self._queue_ack(websocket, client_mid, status="failed", error="group_not_found")
+                            continue
+                        members = json.loads(group[0][3])
+                        sender_str = "G{}U{}".format(gid, self.clients_belonged[websocket])
+                        if not self.clients_belonged[websocket] in members:
+                            self._queue_ack(websocket, client_mid, status="failed", error="not_group_member")
+                            continue
+                        msg_record = self.messages_cursor.add_message(
+                            self.clients_belonged[websocket], 0, file_hashes,
+                            content_type='file', file_hash=file_hashes, quote=quote, group_id=gid,
+                            client_mid=client_mid
+                        )
+                        self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
+                        if msg_record.get("duplicate"):
+                            continue
+                        notif_dict = {
+                            "event" : "message.file",
+                            "title" : str(msg_record["send_time"]),
+                            "content" : file_hashes,
+                            "sender" : sender_str,
+                            "meta" : quote,
+                            "mid" : msg_record["mid"],
+                            "file_hash" : file_hashes,
+                            "client_mid" : client_mid,
+                            "room_id" : "G{}".format(gid),
+                            "group_id" : gid
+                        }
+                        for user in members:
+                            await self._notify_user_async(user, notif_dict)
+
+                    else:
+                        self._queue_ack(websocket, client_mid, status="failed", error="invalid_target")
+
+                elif message["type"] == "message.read":
+                    room_id = message["room_id"]
+                    last_mid = message["last_mid"]
+                    sender_uid = self.clients_belonged[websocket]
+                    broadcast = {
+                        "type": "message.read",
+                        "room_id": room_id,
+                        "uid": sender_uid,
+                        "last_mid": last_mid,
+                    }
+                    if room_id.startswith('U'):
+                        target = int(room_id[1:])
+                        with self._clients_lock:
+                            clients = list(self.connected_clients.get(target, []))
+                        for ws in clients:
+                            asyncio.run_coroutine_threadsafe(
+                                self._queue_message(ws, broadcast), self.loop)
+                    elif room_id.startswith('G'):
+                        gid = int(room_id[1:])
+                        ginfo = self.group_cursor.query_gid(gid)
+                        members = json.loads(ginfo[0][3]) if ginfo else []
+                        for user in members:
+                            with self._clients_lock:
+                                clients = list(self.connected_clients.get(user, []))
+                            for ws in clients:
+                                asyncio.run_coroutine_threadsafe(
+                                    self._queue_message(ws, broadcast), self.loop)
+
+                elif message["type"] in ("typing.start", "typing.stop"):
+                    if not self._check_ws_rate(sender_uid, max_per_second=20, bucket="typing"):
+                        continue
+                    room_id = message["room_id"]
+                    sender_uid = self.clients_belonged[websocket]
+                    broadcast = {
+                        "type": message["type"],
+                        "room_id": room_id,
+                        "uid": sender_uid,
+                    }
+                    if room_id.startswith('U'):
+                        target = int(room_id[1:])
+                        with self._clients_lock:
+                            clients = list(self.connected_clients.get(target, []))
+                        for ws in clients:
+                            asyncio.run_coroutine_threadsafe(
+                                self._queue_message(ws, broadcast), self.loop)
+                    elif room_id.startswith('G'):
+                        gid = int(room_id[1:])
+                        ginfo = self.group_cursor.query_gid(gid)
+                        members = json.loads(ginfo[0][3]) if ginfo else []
+                        for user in members:
+                            if user != sender_uid:
+                                with self._clients_lock:
+                                    clients = list(self.connected_clients.get(user, []))
+                                for ws in clients:
+                                    asyncio.run_coroutine_threadsafe(
+                                        self._queue_message(ws, broadcast), self.loop)
+
+        except Exception as e:
+            print("[ERR] WS消息处理异常: {}".format(e))
 
         finally:
             send_task.cancel()
@@ -209,16 +450,3 @@ class InstantConnect():
         async with websockets.serve(self.handler, "0.0.0.0", self.port_tcp):
             await asyncio.Future() 
 
-if __name__ == '__main__':
-    hasher = PasswordHasher(
-        time_cost=2,
-        memory_cost=65536,
-        parallelism=2,
-        hash_len=24,
-        salt_len=16
-    )
-    user_cursor = db.UserDb(hasher, 'res/7001/db/user.db', 7001, 1145)
-    notification_cursor = db.NotificationsDb('res/7001/db/notification.db', 7001)
-    group_cursor = db.GroupDb('res/7001/db/group.db', 7001)
-    example = InstantConnect(7001, 1145, notification_cursor, user_cursor, group_cursor)
-    asyncio.run(example.main())

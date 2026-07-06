@@ -17,7 +17,7 @@ import threading
 def bool_res() -> tuple: 
     return (str(time.time()) + "False", str(time.time()) + "True")
 
-def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, forum_cursor, file_cursor, notification_cursor, group_cursor, instant_contact):
+def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, forum_cursor, file_cursor, notification_cursor, messages_cursor, group_cursor, instant_contact):
     """
     pri 是 cryptography 库的私钥对象
     pub_pem 是二进制 pem 文件路径
@@ -36,6 +36,13 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         'captcha': threading.Lock(),
         'announcement': threading.Lock(),
     }
+
+    def read_config():
+        with locks['config']:
+            with open("res/{}/config.json".format(port_api), "r+", encoding="utf-8") as file:
+                return json.load(file)
+
+    group_cursor._config_reader = read_config
 
     def build_notification(event : str, title : str, content : str, sender=None, meta=None):
         return {
@@ -94,11 +101,6 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return []
         return ret
 
-    def read_config():
-        with locks['config']:
-            with open("res/{}/config.json".format(port_api), "r+", encoding="utf-8") as file:
-                return json.load(file)
-
     def update_config(mutator):
         with locks['config']:
             with open("res/{}/config.json".format(port_api), "r+", encoding="utf-8") as file:
@@ -120,6 +122,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             "max_file_size" : cfg.get("max_file_size", -1),
             "max_avatar_size" : cfg.get("max_avatar_size", cfg.get("max_file_size", -1)),
             "user_storage_quota" : cfg.get("user_storage_quota", -1),
+            "max_message_length" : cfg.get("max_message_length", 10000),
+            "min_group_name_length" : cfg.get("min_group_name_length", 1),
+            "max_group_name_length" : cfg.get("max_group_name_length", 50),
             "email_activate" : bool(cfg.get("email_activate")),
             "default_asset_urls" : {
                 "logo" : "/avatar/get_logo",
@@ -235,11 +240,11 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         return {
             "uid" : row[0],
             "username" : row[1],
-            "email" : row[2],
-            "stat" : row[3],
-            "create_time" : row[4],
-            "personal_sign" : row[5],
-            "introduction" : row[6]
+            "email" : row[2],# 注意到 row[3] 其实是密码 hash
+            "stat" : row[4],
+            "create_time" : row[5],
+            "personal_sign" : row[6],
+            "introduction" : row[7]
         }
 
     def extract_mentioned_uids(comment : str):
@@ -372,17 +377,39 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
     def clean_deleted_user_state(target_uid : int):
         target_uid = int(target_uid)
-        deleted_group_ids = [row[0] for row in group_cursor.query_creater(target_uid)]
+        user_groups = group_cursor.get_user_group_rows(target_uid)
+        owned_gids = [row[0] for row in group_cursor.query_creater(target_uid)]
         deleted_forum_ids = [row[0] for row in forum_cursor.query_forum_creater(target_uid)]
 
+        # 通知一下噻
+        for row in user_groups:
+            gid = row[0]
+            try:
+                members = json.loads(row[3])
+            except Exception:
+                continue
+            group_name = row[2] or str(gid)
+            if row[1] == target_uid and gid in owned_gids:
+                for member in members:
+                    if member != target_uid:
+                        notify_user(member, "group.deleted", "群聊已解散",
+                            "群 {} 已被解散。".format(group_name),
+                            sender=target_uid, meta={"gid": gid})
+            else:
+                for member in members:
+                    if member != target_uid:
+                        notify_user(member, "group.member.removed", "成员已退出群聊",
+                            "用户 {} 已退出群 {}。".format(target_uid, group_name),
+                            sender=target_uid, meta={"gid": gid})
+
         avatar.clean_avatar(port_api, target_uid, "user")
-        for gid in deleted_group_ids:
+        for gid in owned_gids:
             avatar.clean_avatar(port_api, gid, "group")
         for fid in deleted_forum_ids:
             avatar.clean_avatar(port_api, fid, "forum")
 
         file.clean_user_files(port_api, target_uid, file_cursor)
-        group_cursor.clean_user_membership(target_uid)
+        group_cursor.remove_user_membership(target_uid)
         forum_cursor.clean_user_content(target_uid)
         cleanup_forum_queue(target_uid)
         return True
@@ -419,7 +446,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             uid = req["uid"]
             pwd = req["password"]
             return bool_res()[user_cursor.verify_user(uid, pwd)]
-        except:
+        except Exception:
             return bool_res()[False]
     
 
@@ -433,7 +460,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 return bool_res()[False]
             user_cursor.change_pwd(uid, new_pwd)
             return bool_res()[True]
-        except:
+        except Exception:
             return bool_res()[False]
 
     @app.route('/auth/captcha')
@@ -580,7 +607,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             oped = req["change_uid"]
             new_auth = req["new_auth"]
             return bool_res()[perform_managed_auth_change(uid, pwd, oped, new_auth)]
-        except:
+        except Exception:
             return bool_res()[False]
 
     @api("/auth/manage/create", methods=["POST"])
@@ -621,7 +648,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 user_cursor.delete_user(target_uid)
                 return bool_res()[False]
             return bool_res()[True]
-        except:
+        except Exception:
             return bool_res()[False]
 
     @api("/auth/manage/update", methods=["POST"])
@@ -650,7 +677,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if next_auth is not None:
                 notify_user(target_uid, "auth.stat.changed", "账号状态已变更", "你的账号状态已更新为 {}。".format(next_auth), sender=uid, meta={"new_auth" : next_auth})
             return bool_res()[True]
-        except:
+        except Exception:
             return bool_res()[False]
 
     @api("/auth/manage/ban", methods=["POST"])
@@ -660,7 +687,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             pwd = req["password"]
             target_uid = req["change_uid"]
             return bool_res()[perform_managed_auth_change(uid, pwd, target_uid, "banned")]
-        except:
+        except Exception:
             return bool_res()[False]
 
     @api("/auth/manage/delete", methods=["POST"])
@@ -697,7 +724,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 lambda: notification_cursor.delete_user_table(target_uid)
             )
             return bool_res()[True]
-        except:
+        except Exception:
             return bool_res()[False]
 
     @api("/auth/manage/list", methods=['POST'])
@@ -745,7 +772,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 },
                 "fetch_all" : False
             }, ensure_ascii=False)
-        except:
+        except Exception:
             return bool_res()[False]
     
     @api("/auth/change_sign", methods=['POST'])
@@ -831,7 +858,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if verify_root(uid, pwd) is None:
                 return bool_res()[False]
             return json.dumps(serialize_server_settings(read_config(), include_manage=True), ensure_ascii=False)
-        except:
+        except Exception:
             return bool_res()[False]
 
     @api("/auth/server_settings/update", methods=['POST'])
@@ -876,12 +903,21 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if "user_storage_quota" in req:
                 updates["user_storage_quota"] = parse_int_setting(req["user_storage_quota"], minimum=0, allow_unlimited=True)
 
+            if "max_message_length" in req:
+                updates["max_message_length"] = parse_int_setting(req["max_message_length"], minimum=1)
+
+            if "min_group_name_length" in req:
+                updates["min_group_name_length"] = parse_int_setting(req["min_group_name_length"], minimum=1)
+
+            if "max_group_name_length" in req:
+                updates["max_group_name_length"] = parse_int_setting(req["max_group_name_length"], minimum=1)
+
             if not updates:
                 return bool_res()[False]
 
             cfg = update_config(lambda current: current.update(updates))
             return json.dumps(serialize_server_settings(cfg, include_manage=True), ensure_ascii=False)
-        except:
+        except Exception:
             return bool_res()[False]
 
     @api("/notification/query_all", methods=['POST'])
@@ -1091,7 +1127,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     
     @api("/forum/edit_forum", methods=["POST"])
     def forum_edit_forum(req):
-        """Submit forum edit to approval queue. Owner or admin/root only."""
+        """修改论坛信息，论坛创建者或管理员"""
         uid = req["uid"]
         password = req["password"]
         fid = req["fid"]
@@ -1427,11 +1463,21 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     
     @api('/avatar/upload_group_avatar', methods=['POST'])
     def upload_group_avatar(req):
-        """
-        TODO
-
-        上传群聊 logo
-        """
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        pic_b64 = req["pic"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        if not group_cursor.is_admin(gid, uid):
+            return bool_res()[False]
+        if not validate_avatar_upload(pic_b64, read_config()):
+            return bool_res()[False]
+        try:
+            avatar.upload_avatar(port_api, gid, pic_b64, 'group')
+        except Exception:
+            return bool_res()[False]
+        return bool_res()[True]
 
     @api('/avatar/upload_default_avatar', methods=['POST'])
     def upload_default_avatar(req):
@@ -1687,17 +1733,25 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         uid = req["uid"]
         password = req["password"]
         groupname = req["groupname"]
-        introduction = req["introduction"]
-        if not "enter_hint" in req:
-            enter_hint = ""
-        else:
-            enter_hint = req["enter_hint"]
+        introduction = req.get("introduction", "")
+        enter_hint = req.get("enter_hint", "")
+        allow_direct_join = bool(req.get("allow_direct_join", False))
+        require_review = bool(req.get("require_review", True))
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         user_stat = user_cursor.uid_query(uid)[0][4]
         if user_stat == 'banned':
             return bool_res()[False]
-        return bool_res()[group_cursor.create_group(uid, groupname, enter_hint, introduction)]
+        cfg = read_config()
+        min_len = cfg.get("min_group_name_length", 1)
+        max_len = cfg.get("max_group_name_length", 50)
+        if not isinstance(groupname, str) or not (min_len <= len(groupname.strip()) <= max_len):
+            return bool_res()[False]
+        gid = group_cursor.create_group(uid, groupname, enter_hint, introduction,
+                                        allow_direct_join, require_review)
+        if gid:
+            return json.dumps({"gid": gid})
+        return bool_res()[False]
     
     @app.route("/group/group_info/<gid>")
     def group_info(gid : str): 
@@ -1717,6 +1771,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         uid = req["uid"]
         password = req["password"]
         if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
             return bool_res()[False]
         gid = req["gid"]
         added = req["added"]
@@ -1752,6 +1809,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         removed = req["removed"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
         oper = group_cursor.is_admin(gid, uid)
         oped = group_cursor.is_admin(gid, removed)
         if not oper > oped:
@@ -1772,6 +1832,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         removed = req["removed"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
         if not group_cursor.is_admin(gid, uid) == 2:
             return bool_res()[False]
         succeeded = group_cursor.remove_admin(gid, removed)
@@ -1789,13 +1852,17 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         gid = req["gid"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
         if not group_cursor.is_admin(gid, uid) == 2:
             return bool_res()[False]
         group_info = group_cursor.query_gid(gid)
         if group_info:
             group_info = group_info[0]
             group_name = group_info[2]
-            target_uids = json.loads(group_info[3]) + json.loads(group_info[4]) + [group_info[1]]
+            raw_uids = json.loads(group_info[3]) + json.loads(group_info[4]) + [group_info[1]]
+            target_uids = list(set(raw_uids))
         else:
             group_name = str(gid)
             target_uids = []
@@ -1806,7 +1873,475 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         group_cursor.delete_group(gid)
         notify_users([target_uid for target_uid in target_uids if target_uid != uid], "group.deleted", "群聊已解散", "群 {} 已被解散。".format(group_name), sender=uid, meta={"gid" : gid})
         return bool_res()[True]
-    
+
+    @api("/group/transfer_owner", methods=['POST'])
+    def transfer_owner(req):
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        new_owner = req["new_owner"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
+        if not group_cursor.is_admin(gid, uid) == 2:
+            return bool_res()[False]
+        succeeded = group_cursor.transfer_owner(gid, uid, new_owner)
+        if succeeded:
+            run_notification_side_effect("group.owner.transferred",
+                lambda: notify_user(new_owner, "group.owner.transferred", "你已成为群主",
+                    "你已被转让为群 {} 的群主。".format(group_cursor.query_gid(gid)[0][2] if group_cursor.query_gid(gid) else str(gid)),
+                    sender=uid, meta={"gid": gid}))
+        return bool_res()[succeeded]
+
+    @api("/group/settings", methods=['POST'])
+    def group_settings(req):
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
+        if not group_cursor.is_admin(gid, uid):
+            return bool_res()[False]
+        return json.dumps(group_cursor.get_group_settings(gid), ensure_ascii=False)
+
+    @api("/group/update_settings", methods=['POST'])
+    def update_group_settings(req):
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
+        if not group_cursor.is_admin(gid, uid) == 2:
+            return bool_res()[False]
+        updates = {}
+        for key in ("groupname", "enter_hint", "introduction",
+                     "allow_direct_join", "require_review"):
+            if key in req:
+                updates[key] = req[key]
+        if "groupname" in updates:
+            cfg = read_config()
+            min_len = cfg.get("min_group_name_length", 1)
+            max_len = cfg.get("max_group_name_length", 50)
+            gn = updates["groupname"]
+            if not isinstance(gn, str) or not (min_len <= len(gn.strip()) <= max_len):
+                return bool_res()[False]
+        if not updates:
+            return bool_res()[False]
+        return bool_res()[group_cursor.update_settings(gid, **updates)]
+
+    @api("/group/members", methods=['POST'])
+    def group_members(req):
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
+        if not group_cursor.is_member(gid, uid):
+            return bool_res()[False]
+        member_uids = group_cursor.get_member_uids(gid)
+        admin_uids = group_cursor.get_admin_uids(gid)
+        settings = group_cursor.get_group_settings(gid)
+        members = []
+        if member_uids:
+            placeholders = ",".join("?" * len(member_uids))
+            rows = user_cursor.query(
+                "SELECT uid, username FROM users WHERE uid IN ({})".format(placeholders),
+                tuple(member_uids)
+            )
+            name_map = {r[0]: r[1] for r in rows}
+            for muid in member_uids:
+                role = "owner" if muid == settings.get("creater") else ("admin" if muid in admin_uids else "member")
+                members.append({
+                    "uid": muid,
+                    "username": name_map.get(muid, "User {}".format(muid)),
+                    "role": role,
+                })
+        return json.dumps({"members": members, "settings": settings}, ensure_ascii=False)
+
+    @api("/group/join", methods=['POST'])
+    def join_group(req):
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
+        settings = group_cursor.get_group_settings(gid)
+        if not settings:
+            return bool_res()[False]
+        if group_cursor.is_member(gid, uid):
+            return bool_res()[False]
+        if settings["allow_direct_join"]:
+            if not settings["require_review"]:
+                succeeded = group_cursor.add_member(gid, uid)
+                if succeeded:
+                    return json.dumps({"pending": False})
+                return bool_res()[False]
+            else:
+                members = group_cursor.get_member_uids(gid)
+                cfg = read_config()
+                limit = cfg.get("single_group_max_people", 200)
+                if limit != -1 and len(members) >= limit:
+                    return bool_res()[False]
+                rid = group_cursor.request_join(gid, uid)
+                run_notification_side_effect("group.join.request",
+                    lambda: notify_user(settings["creater"], "group.join.request",
+                        "新的入群申请", "用户 {} 申请加入群 {}。".format(uid, settings["groupname"]),
+                        sender=uid, meta={"gid": gid, "rid": rid}))
+                return json.dumps({"rid": rid, "pending": True})
+        return bool_res()[False]
+
+    @api("/group/invite", methods=['POST'])
+    def invite_to_group(req):
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        invited_uid = req["invited_uid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
+        if not group_cursor.is_member(gid, uid):
+            return bool_res()[False]
+        if not user_cursor.uid_query(invited_uid):
+            return bool_res()[False]
+        if not user_cursor.is_friend(uid, invited_uid):
+            return bool_res()[False]
+        if group_cursor.is_member(gid, invited_uid):
+            return bool_res()[False]
+        settings = group_cursor.get_group_settings(gid)
+        is_admin = group_cursor.is_admin(gid, uid) >= 1
+        if not settings["require_review"] or is_admin:
+            succeeded = group_cursor.add_member(gid, invited_uid)
+            if succeeded:
+                run_notification_side_effect("group.invited",
+                    lambda: notify_user(invited_uid, "group.invited", "你已被邀请加入群聊",
+                        "用户 {} 邀请你加入群 {}。".format(uid, settings["groupname"]),
+                        sender=uid, meta={"gid": gid}))
+                return json.dumps({"pending": False})
+            return bool_res()[False]
+        rid = group_cursor.request_join(gid, invited_uid, inviter_uid=uid)
+        run_notification_side_effect("group.join.request",
+            lambda: notify_user(settings["creater"], "group.join.request",
+                "新的入群申请", "用户 {} 邀请 {} 加入群 {}，等待审核。".format(uid, invited_uid, settings["groupname"]),
+                sender=uid, meta={"gid": gid, "rid": rid}))
+        run_notification_side_effect("group.invited.pending",
+            lambda: notify_user(invited_uid, "group.invited", "你已被邀请加入群聊",
+                "用户 {} 邀请你加入群 {}（需审核）。".format(uid, settings["groupname"]),
+                sender=uid, meta={"gid": gid, "rid": rid}))
+        return json.dumps({"rid": rid, "pending": True})
+
+    @api("/group/join_requests", methods=['POST'])
+    def join_requests(req):
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
+        if not group_cursor.is_admin(gid, uid):
+            return bool_res()[False]
+        requests = group_cursor.get_join_requests(gid)
+        if requests:
+            uids = list(set(r["uid"] for r in requests) | set(r["inviter_uid"] for r in requests if r["inviter_uid"]))
+            if uids:
+                placeholders = ",".join("?" * len(uids))
+                rows = user_cursor.query(
+                    "SELECT uid, username FROM users WHERE uid IN ({})".format(placeholders),
+                    tuple(uids)
+                )
+                name_map = {r[0]: r[1] for r in rows}
+                for req_item in requests:
+                    req_item["username"] = name_map.get(req_item["uid"], "User {}".format(req_item["uid"]))
+                    if req_item["inviter_uid"]:
+                        req_item["inviter_name"] = name_map.get(req_item["inviter_uid"], "")
+        return json.dumps(requests, ensure_ascii=False)
+
+    @api("/group/handle_join_request", methods=['POST'])
+    def handle_join_request(req):
+        uid = req["uid"]
+        password = req["password"]
+        rid = req["rid"]
+        approved = bool(req.get("approved", False))
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
+        req_info = group_cursor.query(
+            "SELECT gid FROM join_requests WHERE rid = ?", (rid,)
+        )
+        if not req_info:
+            return bool_res()[False]
+        gid = req_info[0][0]
+        if not group_cursor.is_admin(gid, uid):
+            return bool_res()[False]
+        succeeded = group_cursor.handle_join_request(rid, approved)
+        if succeeded and approved:
+            settings = group_cursor.get_group_settings(gid)
+            req_data = group_cursor.get_join_requests(gid, status='approved')
+            for r in req_data:
+                if r["rid"] == rid:
+                    run_notification_side_effect("group.join.approved",
+                        lambda: notify_user(r["uid"], "group.join.approved",
+                            "入群申请已通过", "你加入群 {} 的申请已通过。".format(settings.get("groupname", str(gid))),
+                            sender=uid, meta={"gid": gid}))
+        return bool_res()[succeeded]
+
+    @api("/friend/list", methods=['POST'])
+    def friend_list(req):
+        """好友列表返回"""
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        rows = user_cursor.query(
+            "SELECT user1, user2, adder FROM friendship WHERE relationship = 'friend' AND (user1 = ? OR user2 = ?)",
+            (uid, uid)
+        )
+        friend_uids = []
+        for row in rows:
+            friend_uid = row[0] if row[1] == uid else row[1]
+            friend_uids.append(friend_uid)
+        return json.dumps(friend_uids)
+
+    @api("/message/send", methods=['POST'])
+    def send_message(req):
+        """API 统一发送消息（文本和文件）。返回 {mid, status:'sent'}。"""
+        try:
+            uid = req["uid"]
+            password = req["password"]
+            recipient = str(req["recipient"])
+            content = str(req["content"])
+            content_type = str(req.get("content_type", "plain"))
+            client_mid = req.get("client_mid")
+            quote = int(req.get("quote", -1))
+            file_hash = req.get("file_hash") if content_type == "file" else None
+
+            if not user_cursor.verify_user(uid, password):
+                return bool_res()[False]
+            user_stat = user_cursor.uid_query(uid)[0][4]
+            if user_stat == 'banned':
+                return bool_res()[False]
+
+            target_uid = 0
+            group_id = None
+            if recipient.startswith('U'):
+                target_uid = int(recipient[1:])
+                if not user_cursor.is_friend(uid, target_uid):
+                    return bool_res()[False]
+            elif recipient.startswith('G'):
+                group_id = int(recipient[1:])
+                if not group_cursor.is_member(group_id, uid):
+                    return bool_res()[False]
+            else:
+                return bool_res()[False]
+
+            if content_type == "plain" and len(content) > read_config().get("max_message_length", 10000):
+                return bool_res()[False]
+
+            if quote >= 0:
+                if not messages_cursor.verify_quote(quote, uid, target_uid, group_id):
+                    return bool_res()[False]
+                if group_id is not None and not group_cursor.is_member(group_id, uid):
+                    return bool_res()[False]
+
+            msg_record = messages_cursor.add_message(
+                uid, target_uid, content,
+                content_type=content_type, file_hash=file_hash,
+                quote=quote, group_id=group_id, client_mid=client_mid
+            )
+
+            if msg_record.get("duplicate"):
+                return json.dumps({"mid": msg_record["mid"], "client_mid": client_mid, "status": "sent"})
+
+            notif = build_notification(
+                "message.{}".format(content_type),
+                str(msg_record["send_time"]),
+                content,
+                sender="G{}U{}".format(group_id, uid) if group_id else "U{}".format(uid),
+                meta=quote
+            )
+            notif["mid"] = msg_record["mid"]
+            notif["client_mid"] = client_mid
+            if group_id:
+                notif["group_id"] = group_id
+                notif["room_id"] = "G{}".format(group_id)
+            if file_hash:
+                notif["file_hash"] = file_hash
+
+            if group_id:
+                ginfo = group_cursor.query_gid(group_id)
+                if ginfo:
+                    members = json.loads(ginfo[0][3])
+                    for user in members:
+                        instant_contact.notify_user(user, notif)
+            else:
+                recv_notif = dict(notif)
+                recv_notif["room_id"] = "U{}".format(uid)
+                sender_notif = dict(notif)
+                sender_notif["room_id"] = "U{}".format(target_uid)
+                instant_contact.notify_user(target_uid, recv_notif)
+                instant_contact.notify_user(uid, sender_notif)
+
+            return json.dumps({"mid": msg_record["mid"], "client_mid": client_mid, "status": "sent"})
+        except Exception:
+            return bool_res()[False]
+
+    @api("/chat/list", methods=['POST'])
+    def chat_list(req):
+        """返回所有聊天会话及最后一条消息和对方资料。"""
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            print("[WARN] chat_list: verify_user failed for uid={}".format(uid))
+            return json.dumps({"error": "auth_failed"}, ensure_ascii=False)
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
+
+        try:
+            chat_rows = messages_cursor.get_chat_list(uid)
+        except Exception as e:
+            print("[WARN] chat_list: get_chat_list failed for uid={}: {}".format(uid, e))
+            chat_rows = []
+        partner_map = {}
+        for c in chat_rows:
+            partner_map[c["partner_uid"]] = c
+
+        friend_uids = set()
+        friend_rows = user_cursor.query(
+            """SELECT CASE WHEN user1 = ? THEN user2 ELSE user1 END
+               FROM friendship WHERE relationship = 'friend' AND (user1 = ? OR user2 = ?)""",
+            (uid, uid, uid)
+        )
+        for r in friend_rows:
+            fuid = r[0]
+            friend_uids.add(fuid)
+            if fuid not in partner_map:
+                partner_map[fuid] = {
+                    "partner_uid": fuid,
+                    "group_id": None,
+                    "last_mid": None, "last_sender_uid": None,
+                    "last_content": None, "last_content_type": None, "last_time": None,
+                }
+
+        group_rows = group_cursor.get_user_group_rows(uid)
+        group_ids = [row[0] for row in group_rows]
+        last_msgs = messages_cursor.get_group_last_messages(group_ids) if group_ids else {}
+        for row in group_rows:
+            gid = row[0]
+            groupname = row[2]
+            last = last_msgs.get(gid)
+            partner_map[-gid] = {
+                "partner_uid": gid,
+                "group_id": gid,
+                "groupname": groupname,
+                "last_mid": last["mid"] if last else None,
+                "last_sender_uid": last["sender_uid"] if last else None,
+                "last_content": last["content"] if last else None,
+                "last_content_type": last["content_type"] if last else None,
+                "last_time": last["send_time"] if last else None,
+            }
+
+        direct_puids = [k for k in partner_map.keys() if k >= 0]
+        username_map = {}
+        if direct_puids:
+            placeholders = ",".join("?" * len(direct_puids))
+            uname_rows = user_cursor.query(
+                "SELECT uid, username FROM users WHERE uid IN ({})".format(placeholders),
+                tuple(direct_puids)
+            )
+            username_map = {r[0]: r[1] for r in uname_rows}
+
+        result = []
+        for key, chat in partner_map.items():
+            if key < 0:
+                gid = chat["group_id"]
+                result.append({
+                    "room_id": "G{}".format(gid),
+                    "room_type": "group",
+                    "partner_uid": gid,
+                    "username": chat.get("groupname", "Group {}".format(gid)),
+                    "avatar": "/avatar/get_avatar/group/{}".format(gid),
+                    "last_content": chat.get("last_content"),
+                    "last_content_type": chat.get("last_content_type"),
+                    "last_time": chat.get("last_time"),
+                    "last_sender_uid": chat.get("last_sender_uid"),
+                    "last_mid": chat.get("last_mid"),
+                    "is_friend": False,
+                })
+            else:
+                result.append({
+                    "room_id": "U{}".format(key),
+                    "room_type": "direct",
+                    "partner_uid": key,
+                    "username": username_map.get(key, "User {}".format(key)),
+                    "avatar": "/avatar/get_avatar/user/{}".format(key),
+                    "last_content": chat.get("last_content"),
+                    "last_content_type": chat.get("last_content_type"),
+                    "last_time": chat.get("last_time"),
+                    "last_sender_uid": chat.get("last_sender_uid"),
+                    "last_mid": chat.get("last_mid"),
+                    "is_friend": key in friend_uids,
+                })
+
+        result.sort(key=lambda x: x.get("last_time") or 0, reverse=True)
+        print("[INFO] chat_list uid={}: chat_rows={}, friend_uids={}, groups={}, result={}".format(
+            uid, len(chat_rows), len(friend_uids), len(group_rows), len(result)))
+        return json.dumps(result, ensure_ascii=False)
+
+    @api("/message/history", methods=['POST'])
+    def message_history(req):
+        """获取历史消息"""
+        uid = req["uid"]
+        password = req["password"]
+        try:
+            has_target = req.get("target_uid") is not None
+            target_uid = int(req.get("target_uid", 0)) if has_target else 0
+            group_id = req.get("group_id")
+            before_mid = int(req.get("before_mid", 0))
+            limit = min(int(req.get("limit", 50)), 200)
+            if group_id is not None:
+                group_id = int(group_id)
+        except (ValueError, TypeError):
+            return bool_res()[False]
+
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
+
+        if group_id is not None:
+            if not group_cursor.is_member(group_id, uid):
+                return bool_res()[False]
+        elif has_target:
+            if not user_cursor.is_friend(uid, target_uid):
+                return bool_res()[False]
+        else:
+            return bool_res()[False]
+
+        rows = messages_cursor.query_history(uid, target_uid,
+            before_mid=before_mid, limit=limit, group_id=group_id)
+        return json.dumps(messages_cursor.serialize_rows(rows), ensure_ascii=False)
+
     @api("/friend/add_friend", methods=['POST'])
     def add_friend(req):
         uid = req["uid"]
@@ -1837,7 +2372,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not relationship:
             return bool_res()[False]
         rel = relationship[0]
-        if rel[2] != 'pending' or rel[3] != dealt:
+        if rel[3] != dealt:
+            return bool_res()[False]
+        if rel[2] not in ('pending', 'friend'):
             return bool_res()[False]
         if stat == "allow":
             succeeded = user_cursor.change_relationship(uid, dealt, 'friend')

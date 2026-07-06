@@ -215,6 +215,7 @@ def main(args=None):
     global FILE_CURSOR
     global NOTIFICATION_CURSOR
     global GROUP_CURSOR
+    global MESSAGES_CURSOR
     
 
     if args is None:
@@ -284,9 +285,10 @@ def main(args=None):
     FILE_CURSOR = db.FileDb("res/{}/file/file.db".format(PORT_API), PORT_API)
     FILE_CURSOR.create_file_db()
     NOTIFICATION_CURSOR = db.NotificationsDb("res/{}/db/notification.db".format(PORT_API), PORT_API)
+    MESSAGES_CURSOR = db.MessagesDb("res/{}/db/messages.db".format(PORT_API), PORT_API)
     GROUP_CURSOR = db.GroupDb("res/{}/db/group.db".format(PORT_API), PORT_API)
-    INSTANT_CONTACT = InstantConnect(PORT_API, PORT_TCP, NOTIFICATION_CURSOR, USER_CURSOR, GROUP_CURSOR)
-    FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR, FILE_CURSOR, NOTIFICATION_CURSOR, GROUP_CURSOR, INSTANT_CONTACT)
+    INSTANT_CONTACT = InstantConnect(PORT_API, PORT_TCP, NOTIFICATION_CURSOR, USER_CURSOR, MESSAGES_CURSOR, GROUP_CURSOR)
+    FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR, FILE_CURSOR, NOTIFICATION_CURSOR, MESSAGES_CURSOR, GROUP_CURSOR, INSTANT_CONTACT)
     start_api = args.start_api
     if not args.cli_mode:
         prt("注意：生产环境内不要显式启动 api 服务器！", "yellow")
@@ -312,11 +314,12 @@ if __name__ == '__main__':
             # TCP_THREAD.start()
             asyncio.run(INSTANT_CONTACT.main())
     except Exception as e:
-        FILE_CURSOR.conn.close()
-        USER_CURSOR.conn.close()
-        FORUM_CURSOR.conn.close()
-        GROUP_CURSOR.conn.close()
-        NOTIFICATION_CURSOR.conn.close()
+        for name in ('FILE_CURSOR', 'USER_CURSOR', 'FORUM_CURSOR', 'GROUP_CURSOR',
+                      'NOTIFICATION_CURSOR', 'MESSAGES_CURSOR'):
+            obj = globals().get(name)
+            if obj is not None:
+                try: obj.conn.close()
+                except Exception: pass
         prt(e, "red")
         prt("运行或操作错误，程序终止", "red")
         exit()
