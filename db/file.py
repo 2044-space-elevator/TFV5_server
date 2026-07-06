@@ -176,5 +176,27 @@ class FileDb(Db):
 
             return self._execute_with_retry(operation)
 
+    def get_all_user_files(self, uid : int = None):
+        if uid is not None:
+            return self.query(
+                "SELECT uf.uid, uf.hash, uf.file_name, uf.upload_time, "
+                "f.size, f.ref_count, f.upload_user_count, f.sender "
+                "FROM user_file uf JOIN file f ON uf.hash = f.hash "
+                "WHERE uf.active = TRUE AND uf.uid = ?",
+                (uid,))
+        return self.query(
+            "SELECT uf.uid, uf.hash, uf.file_name, uf.upload_time, "
+            "f.size, f.ref_count, f.upload_user_count, f.sender "
+            "FROM user_file uf JOIN file f ON uf.hash = f.hash "
+            "WHERE uf.active = TRUE")
+
+    def force_delete_file(self, hashes : str):
+        with self.lock:
+            def operation():
+                self.cursor.execute("DELETE FROM file WHERE hash = ?", (hashes,))
+                self.cursor.execute("DELETE FROM user_file WHERE hash = ?", (hashes,))
+                self.conn.commit()
+            return self._execute_with_retry(operation)
+
     def return_file(self, hashes : str):
         return self.query("SELECT * FROM file WHERE hash = ?", (hashes,))

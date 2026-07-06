@@ -143,6 +143,64 @@ TFV5 的文件存储系统基于哈希去重和用户配额管理。同一文件
 
 返回：成功返回时间戳加 `True`。
 
+## 管理员 API
+
+> 以下接口仅 admin 或 root 用户可访问。
+
+### 查看所有用户文件
+
+- `^ POST /file/admin_get_all_files` 查看所有用户的已上传文件（或指定用户的文件）。
+
+请求体：
+
+```json
+{
+    "uid" : <operator_uid>,
+    "password" : <operator_password>,
+    "target_uid" : <optional, 不填则查询所有用户>
+}
+```
+
+返回体：
+
+```json
+[
+    {
+        "uid" : <file_owner_uid>,
+        "username" : <file_owner_username>,
+        "hash" : <hash>,
+        "file_name" : <file_name>,
+        "upload_time" : <upload_time>,
+        "size" : <size>,
+        "ref_count" : <ref_count>,
+        "upload_user_count" : <upload_user_count>,
+        "sender" : <original_sender_uid>
+    }
+]
+```
+
+### 强行删除文件
+
+- `^ POST /file/admin_force_delete_file` 强行删除文件，忽略引用计数和上传用户计数。
+
+请求体：
+
+```json
+{
+    "uid" : <operator_uid>,
+    "password" : <operator_password>,
+    "hash" : <hash>
+}
+```
+
+返回：成功返回时间戳加 `True`。
+
+删除行为：
+- 立即从服务器磁盘删除文件
+- 删除数据库中的文件记录
+- 删除所有用户与该文件的关联记录（`user_file` 表）
+- **不检查引用计数**，即使文件仍被帖子或消息引用也会被删除
+
 ## 管理员配置
 
 管理员可通过 `^ POST /auth/server_settings/update` 配置存储相关参数：

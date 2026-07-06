@@ -1550,6 +1550,52 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         file.delete_user_file(port_api, uid, hashes, file_cursor)
         return bool_res()[True]
 
+    @api('/file/admin_get_all_files', methods=['POST'])
+    def admin_get_all_files(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat not in ['admin', 'root']:
+            return bool_res()[False]
+        target_uid = req.get("target_uid")
+        rows = file_cursor.get_all_user_files(target_uid)
+        result = []
+        for row in rows:
+            username = ""
+            try:
+                uq = user_cursor.uid_query(row[0])
+                if uq:
+                    username = uq[0][1]
+            except Exception:
+                pass
+            result.append({
+                "uid" : row[0],
+                "username" : username,
+                "hash" : row[1],
+                "file_name" : row[2],
+                "upload_time" : row[3],
+                "size" : row[4],
+                "ref_count" : row[5],
+                "upload_user_count" : row[6],
+                "sender" : row[7]
+            })
+        return json.dumps(result, ensure_ascii=False)
+
+    @api('/file/admin_force_delete_file', methods=['POST'])
+    def admin_force_delete_file(req):
+        uid = req["uid"]
+        password = req["password"]
+        hashes = req["hash"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat not in ['admin', 'root']:
+            return bool_res()[False]
+        file.force_delete_file(port_api, hashes, file_cursor)
+        return bool_res()[True]
+
     @app.route('/file/get_file_info/<hashes>')
     def get_file_info(hashes):
         qry = file_cursor.return_file(hashes)
