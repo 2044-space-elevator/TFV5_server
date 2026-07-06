@@ -119,6 +119,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             "single_group_max_people" : cfg.get("single_group_max_people", 200),
             "max_file_size" : cfg.get("max_file_size", -1),
             "max_avatar_size" : cfg.get("max_avatar_size", cfg.get("max_file_size", -1)),
+            "user_storage_quota" : cfg.get("user_storage_quota", -1),
             "email_activate" : bool(cfg.get("email_activate")),
             "default_asset_urls" : {
                 "logo" : "/avatar/get_logo",
@@ -216,19 +217,19 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     def validate_file_upload(filename, file_b64, cfg):
         normalized_name = normalize_upload_filename(filename)
         if normalized_name is None:
-            return None
+            return None, None
         payload = decode_base64_payload(file_b64)
         if payload is None:
-            return None
+            return None, None
         max_file_size = read_upload_limit(cfg, "max_file_size")
         if max_file_size != -1 and len(payload) > max_file_size:
-            return None
+            return None, None
         allowed_extensions = read_allowed_file_extensions(cfg)
         if allowed_extensions:
             _, ext = os.path.splitext(normalized_name.lower())
             if not ext or ext not in allowed_extensions:
-                return None
-        return normalized_name
+                return None, None
+        return normalized_name, payload
 
     def serialize_user_summary(row):
         return {
@@ -872,6 +873,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if "max_avatar_size" in req:
                 updates["max_avatar_size"] = parse_int_setting(req["max_avatar_size"], minimum=0, allow_unlimited=True)
 
+            if "user_storage_quota" in req:
+                updates["user_storage_quota"] = parse_int_setting(req["user_storage_quota"], minimum=0, allow_unlimited=True)
+
             if not updates:
                 return bool_res()[False]
 
@@ -1469,9 +1473,17 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if user_stat == 'banned':
             return bool_res()[False]
         cfg = read_config()
-        normalized_name = validate_file_upload(filename, file_b64, cfg)
+        normalized_name, payload = validate_file_upload(filename, file_b64, cfg)
         if normalized_name is None:
             return bool_res()[False]
+        quota = cfg.get("user_storage_quota", -1)
+        if quota != -1 and payload is not None:
+            new_size = len(payload)
+            new_hashes = file.sha256(payload)
+            current_usage = file_cursor.get_user_storage_used(uid)
+            if not file_cursor.has_active_user_file(uid, new_hashes):
+                if current_usage + new_size > quota:
+                    return bool_res()[False]
         try:
             hashes = file.upload_file(port_api, uid, file_b64, normalized_name, file_cursor)
         except Exception:
@@ -1494,6 +1506,50 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         file.dereference_file(port_api, hashes, file_cursor)
         return bool_res()[True]
 
+    @api('/file/get_user_files', methods=['POST'])
+    def get_user_files(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        rows = file_cursor.get_user_files(uid)
+        result = []
+        for row in rows:
+            result.append({
+                "hash" : row[0],
+                "file_name" : row[1],
+                "upload_time" : row[2],
+                "size" : row[3],
+                "ref_count" : row[4],
+                "upload_user_count" : row[5]
+            })
+        return json.dumps(result, ensure_ascii=False)
+
+    @api('/file/get_storage_info', methods=['POST'])
+    def get_storage_info(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        cfg = read_config()
+        quota = cfg.get("user_storage_quota", -1)
+        used = file_cursor.get_user_storage_used(uid)
+        return json.dumps({
+            "quota" : quota,
+            "used" : used,
+            "remaining" : -1 if quota == -1 else max(quota - used, 0)
+        }, ensure_ascii=False)
+
+    @api('/file/delete_file', methods=['POST'])
+    def delete_file(req):
+        uid = req["uid"]
+        password = req["password"]
+        hashes = req["hash"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        file.delete_user_file(port_api, uid, hashes, file_cursor)
+        return bool_res()[True]
+
     @app.route('/file/get_file_info/<hashes>')
     def get_file_info(hashes):
         qry = file_cursor.return_file(hashes)
@@ -1502,24 +1558,28 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         row = qry[0]
         ref_count = row[5] if len(row) > 5 else 1
         last_ref_time = row[6] if len(row) > 6 else row[2]
+        size = row[7] if len(row) > 7 else 0
+        upload_user_count = row[8] if len(row) > 8 else 1
         return {
             "sender" : row[0],
             "file_name" : row[1],
             "send_time" : row[2],
             "hash" : row[3],
             "ref_count" : ref_count,
-            "last_ref_time" : last_ref_time
+            "last_ref_time" : last_ref_time,
+            "size" : size,
+            "upload_user_count" : upload_user_count
         }
-    
+
     @app.route("/file/get_file/<hashes>")
     def get_file(hashes : str):
         qry = file_cursor.return_file(hashes)
         if not qry:
-            return
+            return ("", 404)
         row = qry[0]
-        active = row[5] > 0 if len(row) > 5 else row[4]
-        if not active:
-            return
+        upload_user_count = row[8] if len(row) > 8 else 1
+        if upload_user_count <= 0:
+            return ("", 404)
         return send_file("res/{}/file/{}.file".format(port_api, hashes), download_name=row[1], as_attachment=True)
     
     @api("/announcement/upload_announcement", methods=['POST'])
