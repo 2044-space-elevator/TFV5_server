@@ -50,6 +50,10 @@ TFV5 的通知系统由两部分组成：
 - `group.member.removed`
 - `group.admin.removed`
 - `group.deleted`
+- `group.owner.transferred`
+- `group.join.request`
+- `group.invited`
+- `group.join.approved`
 - `message.plain`
 - `message.file`
 
@@ -183,79 +187,189 @@ ws://<server_host>:<port_tcp>
 
 客户端收到 `NOTIFICATION.NEW` 后，可以直接展示，也可以用其中的 `time_stamp` 配合 `query_after` 或 `delete_before` 做本地同步与清理。
 
-#### 接受文本信息
-
-
-**在 <info> 中**，有：
-```json
-{
-    "event" : "message.plain",
-    "title" : <this_mid>,
-    "content" : <content>,
-    "sender" : <uid>,
-    "meta" : <quote_mid>
-}
-```
-
-各参数含义请见“客户端发送的”。
-
-**且，如果聊天对象是群聊，那么 `<uid>` 是：`G<Gid>U<Uid>`，比如群编号 0 以及用户编号也是 0，那么 `<uid> 即为 `G0U0`。如果聊天对象是用户，那么 `<uid> 是用户编号。**
-
-#### 接受文件信息
+#### 接收文本消息
 
 **在 <info> 中**，有：
 ```json
 {
-    "event" : "message.file",
-    "title" : <this_mid>,
-    "content" : <hashes>,
-    "sender" : <uid>,
-    "meta" : <quote_mid>
+    “event” : “message.plain”,
+    “title” : “<send_time>”,
+    “content” : <content>,
+    “sender” : “<sender_id>”,
+    “meta” : <quote_mid>,
+    “mid” : <mid>,
+    “client_mid” : <client_mid>,
+    “room_id” : “<room_id>”
 }
 ```
 
-各参数含义请见“客户端发送的”。
+新增字段说明：
+- `<mid>`：服务端分配的消息唯一 ID。
+- `<client_mid>`：客户端发送时携带的去重标识（若发送时未携带则为 `null`）。
+- `<room_id>`：聊天室标识。私聊时，接收方看到的 `room_id` 为发送者 uid（`”U<sender_uid>”`），发送方（自己也会收到推送）看到的为 `”U<target_uid>”`。群聊时为 `”G<gid>”`。
 
-**且，如果聊天对象是群聊，那么 `<uid>` 是：`G<Gid>U<Uid>`，比如群编号 0 以及用户编号也是 0，那么 `<uid> 即为 `G0U0`。如果聊天对象是用户，那么 `<uid> 是用户编号。**
+`<sender_id>` 的格式：
+- 私聊：`”U<uid>”`，如 `”U0”`。
+- 群聊：`”G<gid>U<uid>”`，如 `”G0U0”`。
 
-### 客户端发送的
+其余字段含义见[消息文档](message.md)。
 
-需注意，发送信息时，如果发送成功那么服务器会再
+#### 接收文件消息
 
-鉴于大部分功能已经被 API 统一处理，为了加快线上沟通效率，TFV5 在 WebSocket 接口中允许客户端发送一对一通讯信息（即好友快速通讯和群聊快速通讯）。
+**在 <info> 中**，有：
+```json
+{
+    “event” : “message.file”,
+    “title” : “<send_time>”,
+    “content” : <hashes>,
+    “sender” : “<sender_id>”,
+    “meta” : <quote_mid>,
+    “mid” : <mid>,
+    “file_hash” : <hashes>,
+    “client_mid” : <client_mid>,
+    “room_id” : “<room_id>”
+}
+```
 
-允许发送文件和纯文本，可以带一个引用，引用的为 message id（message id 将在 notification 中被提供）。对于文本类型格式如下（封装格式参考 secret 类型）：
+格式说明同文本消息。`<hashes>` 是文件的取件码。
+
+### 客户端发送消息
+
+TFV5 在 WebSocket 中支持发送文本和文件消息，可带引用。
+
+每条消息可携带 `client_mid`（客户端生成的唯一标识），服务端会返回 `message.ack` 确认包（含服务端 `mid`），并利用 `client_mid` 对重传做去重。
+
+服务端对每个用户实施每秒 10 条消息的限流。详情参见[消息文档](message.md)。
+
+**文本消息**格式如下（封装格式参考 secret 类型）：
 
 ```json
 {
-    "type" : "message.plain",
-    "content" : {
-        "send_to" : <id>,
-        "plain" : <content>,
-        "quote" : <mid>
+    “type” : “message.plain”,
+    “client_mid” : “<client_mid>”,
+    “content” : {
+        “send_to” : “<id>”,
+        “plain” : “<content>”,
+        “quote” : <mid>
     }
 }
 ```
 
-其中 `<id>` 是**字符串**，对于该字符串：
-- 如果是发给用户的，请注明 "U<Uid>"，<Uid> 是用户编码。（例如 "U0"）
-- 如果是发到群聊的，请注明 "G<Gid>"，<Gid> 是群聊编码。
+其中 `<id>` 是**字符串**：
+- 发给用户：`”U<Uid>”`，例如 `”U0”`
+- 发到群聊：`”G<Gid>”`
 
-如果不引用，`<mid>` 为 -1。
+不引用时 `<mid>` 为 `-1`。
 
-文件格式如下：
+**文件消息**格式如下：
 
 ```json
 {
-    "type" : "message.file",
-    "content" : {
-        "send_to" : <id>,
-        "file_hashes" : <hashes>,
-        "quote" : <mid>
+    “type” : “message.file”,
+    “client_mid” : “<client_mid>”,
+    “content” : {
+        “send_to” : “<id>”,
+        “file_hashes” : “<hashes>”,
+        “quote” : <mid>
     }
 }
 ```
 
-`<hashes>` 是文件的“取件码”，在上传文件的时候由 API 返回。
+`<hashes>` 是文件取件码，由上传文件 API 返回。
 
-`<mid>`、`<id>` 的说明如上。
+### 发送确认（message.ack）
+
+服务端收到消息后立即返回 ACK：
+
+```json
+{
+    “type” : “message.ack”,
+    “client_mid” : “<client_mid>”,
+    “mid” : <mid>,
+    “status” : “sent”
+}
+```
+
+若消息被拒绝：
+
+```json
+{
+    “type” : “message.ack”,
+    “client_mid” : “<client_mid>”,
+    “status” : “failed”,
+    “error” : “<error_code>”
+}
+```
+
+错误码包括：`not_friends`、`not_group_member`、`rate_limited`、`message_too_long`、`invalid_quote`、`invalid_target`、`group_not_found`、`banned`。详见[消息文档](message.md)。
+
+### 已读回执（message.read）
+
+客户端可发送已读回执，服务端广播给聊天室内其他在线成员：
+
+请求：
+```json
+{
+    “type” : “message.read”,
+    “room_id” : “<room_id>”,
+    “last_mid” : <last_read_mid>
+}
+```
+
+广播：
+```json
+{
+    “type” : “message.read”,
+    “room_id” : “<room_id>”,
+    “uid” : <reader_uid>,
+    “last_mid” : <last_read_mid>
+}
+```
+
+### 输入状态（typing.start / typing.stop）
+
+客户端发送输入状态，服务端广播给聊天室内其他在线成员（群聊时不广播给自己）：
+
+请求：
+```json
+{
+    “type” : “typing.start”,
+    “room_id” : “<room_id>”
+}
+```
+
+```json
+{
+    “type” : “typing.stop”,
+    “room_id” : “<room_id>”
+}
+```
+
+广播：
+```json
+{
+    “type” : “typing.start”,
+    “room_id” : “<room_id>”,
+    “uid” : <typer_uid>
+}
+```
+
+### 心跳（PING / PONG）
+
+保持连接活跃：
+
+请求：
+```json
+{
+    “type” : “PING”
+}
+```
+
+响应：
+```json
+{
+    “type” : “PONG”
+}
+```
+
+心跳不计入消息频率限制。

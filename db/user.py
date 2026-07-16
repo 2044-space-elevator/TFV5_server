@@ -246,6 +246,10 @@ class UserDb(Db):
             uida, uidb = uidb, uida
             
         return self.query("SELECT * from friendship WHERE user1 = ? and user2 = ?", (uida, uidb))
+
+    def is_friend(self, uida, uidb):
+        relationship = self.query_relationship(uida, uidb)
+        return bool(relationship and relationship[0][2] == 'friend')
     
     def change_relationship(self, uida, uidb, newrelationship):
         if newrelationship not in ['pending', 'blocked', 'friend']:
@@ -269,7 +273,7 @@ class UserDb(Db):
         if uida > uidb:
             uida, uidb = uidb, uida
 
-        self.execute("INSERT INTO friendship (user1, user2, adder, blocked_by_user1, blocked_by_user2) VALUES (?, ?, ?, ?, ?)", (uida, uidb, adder, False, False))
+        self.execute("INSERT INTO friendship (user1, user2, adder, relationship, blocked_by_user1, blocked_by_user2) VALUES (?, ?, ?, 'pending', ?, ?)", (uida, uidb, adder, False, False))
         return True
 
     def delete_relationship(self, uida, uidb):

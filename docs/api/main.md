@@ -17,6 +17,8 @@
 - [info.md](info.md) 服务器信息 API
 - [file.md](file.md) 文件存储 API
 - [friend.md](friend.md) 好友相关 API
+- [group.md](group.md) 群聊相关 API
+- [message.md](message.md) 消息与聊天相关 API
 - [notification.md](notification.md) 通知系统与实时推送 API
 
 ## 文档约定

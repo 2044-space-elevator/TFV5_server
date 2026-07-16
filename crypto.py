@@ -56,6 +56,8 @@ def return_app_route(app,  pri):
                     aes_key, iv_bytes, content = deal_req_data(req_data, pri)
                     content = json.loads(json.dumps(content))
                     ret = func(content, *wrapper_args, **wrapper_kwargs)
+                    if not isinstance(ret, str):
+                        ret = json.dumps(ret)
                     iv, ret = aes_encrypt(ret, aes_key)
                     iv = base64.b64encode(iv).decode("utf-8")
                     ret = base64.b64encode(ret).decode("utf-8")
