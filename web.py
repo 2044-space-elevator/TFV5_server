@@ -240,11 +240,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         return {
             "uid" : row[0],
             "username" : row[1],
-            "email" : row[2],# 注意到 row[3] 其实是密码 hash
-            "stat" : row[4],
-            "create_time" : row[5],
-            "personal_sign" : row[6],
-            "introduction" : row[7]
+            "email" : row[2],
+            # 注意到 row[3] 不是 pwd hash
+            "stat" : row[3],
+            "create_time" : row[4],
+            "personal_sign" : row[5],
+            "introduction" : row[6]
         }
 
     def extract_mentioned_uids(comment : str):
