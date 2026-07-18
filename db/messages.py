@@ -96,7 +96,8 @@ class MessagesDb(Db):
             where = "deleted = 0 AND group_id = ?"
             params = [group_id]
         else:
-            where = ("deleted = 0 AND ((sender_uid = ? AND receiver_uid = ?) "
+            where = ("deleted = 0 AND group_id IS NULL AND "
+                     "((sender_uid = ? AND receiver_uid = ?) "
                      "OR (sender_uid = ? AND receiver_uid = ?))")
             params = [uid, target_uid, target_uid, uid]
 
