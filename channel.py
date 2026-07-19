@@ -10,6 +10,20 @@ import os
 import threading
 from collections import defaultdict
 
+
+def can_access_room(user_cursor, group_cursor, uid: int, room_id: str) -> bool:
+    if not isinstance(room_id, str) or len(room_id) < 2:
+        return False
+    try:
+        target_id = int(room_id[1:])
+    except (TypeError, ValueError):
+        return False
+    if room_id.startswith('U'):
+        return user_cursor.is_friend(uid, target_id)
+    if room_id.startswith('G'):
+        return group_cursor.is_member(target_id, uid)
+    return False
+
 class InstantConnect():
     def __init__(self, port_api, port_tcp, notification_cursor, user_cursor, messages_cursor, group_cursor):
         self.port_api = port_api
@@ -265,7 +279,7 @@ class InstantConnect():
                         if not group:
                             self._queue_ack(websocket, client_mid, status="failed", error="group_not_found")
                             continue
-                        members = json.loads(group[0][3])
+                        members = self.group_cursor.get_member_uids(gid)
                         sender_str = "G{}U{}".format(gid, self.clients_belonged[websocket])
                         if not self.clients_belonged[websocket] in members:
                             self._queue_ack(websocket, client_mid, status="failed", error="not_group_member")
@@ -348,7 +362,7 @@ class InstantConnect():
                         if not group:
                             self._queue_ack(websocket, client_mid, status="failed", error="group_not_found")
                             continue
-                        members = json.loads(group[0][3])
+                        members = self.group_cursor.get_member_uids(gid)
                         sender_str = "G{}U{}".format(gid, self.clients_belonged[websocket])
                         if not self.clients_belonged[websocket] in members:
                             self._queue_ack(websocket, client_mid, status="failed", error="not_group_member")
@@ -383,6 +397,8 @@ class InstantConnect():
                     room_id = message["room_id"]
                     last_mid = message["last_mid"]
                     sender_uid = self.clients_belonged[websocket]
+                    if not can_access_room(self.user_cursor, self.group_cursor, sender_uid, room_id):
+                        continue
                     broadcast = {
                         "type": "message.read",
                         "room_id": room_id,
@@ -398,8 +414,7 @@ class InstantConnect():
                                 self._queue_message(ws, broadcast), self.loop)
                     elif room_id.startswith('G'):
                         gid = int(room_id[1:])
-                        ginfo = self.group_cursor.query_gid(gid)
-                        members = json.loads(ginfo[0][3]) if ginfo else []
+                        members = self.group_cursor.get_member_uids(gid)
                         for user in members:
                             with self._clients_lock:
                                 clients = list(self.connected_clients.get(user, []))
@@ -412,6 +427,8 @@ class InstantConnect():
                         continue
                     room_id = message["room_id"]
                     sender_uid = self.clients_belonged[websocket]
+                    if not can_access_room(self.user_cursor, self.group_cursor, sender_uid, room_id):
+                        continue
                     broadcast = {
                         "type": message["type"],
                         "room_id": room_id,
@@ -426,8 +443,7 @@ class InstantConnect():
                                 self._queue_message(ws, broadcast), self.loop)
                     elif room_id.startswith('G'):
                         gid = int(room_id[1:])
-                        ginfo = self.group_cursor.query_gid(gid)
-                        members = json.loads(ginfo[0][3]) if ginfo else []
+                        members = self.group_cursor.get_member_uids(gid)
                         for user in members:
                             if user != sender_uid:
                                 with self._clients_lock:

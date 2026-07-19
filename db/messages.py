@@ -59,23 +59,38 @@ class MessagesDb(Db):
                     client_mid: str = None) -> dict:
         send_time = time.time()
         from sqlite3 import IntegrityError
-        try:
-            self.execute(
-                """INSERT INTO messages
-                   (client_mid, sender_uid, receiver_uid, group_id, content, content_type,
-                    file_hash, send_time, quote)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (client_mid, sender_uid, receiver_uid, group_id, content, content_type,
-                 file_hash, send_time, quote)
-            )
-        except IntegrityError:
-            if client_mid:
-                existing = self.query("SELECT mid FROM messages WHERE client_mid = ?", (client_mid,))
-                if existing:
-                    return {"mid": existing[0][0], "duplicate": True}
-            raise
+        with self.lock:
+            def operation():
+                try:
+                    self.cursor.execute(
+                        """INSERT INTO messages
+                           (client_mid, sender_uid, receiver_uid, group_id, content, content_type,
+                            file_hash, send_time, quote)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (client_mid, sender_uid, receiver_uid, group_id, content, content_type,
+                         file_hash, send_time, quote),
+                    )
+                    mid = self.cursor.lastrowid
+                    self.conn.commit()
+                    return mid, False
+                except IntegrityError:
+                    self.conn.rollback()
+                    if client_mid:
+                        self.cursor.execute(
+                            "SELECT mid FROM messages WHERE client_mid = ?",
+                            (client_mid,),
+                        )
+                        existing = self.cursor.fetchone()
+                        if existing:
+                            return existing[0], True
+                    raise
+
+            mid, duplicate = self._execute_with_retry(operation)
+
+        if duplicate:
+            return {"mid": mid, "duplicate": True}
         return {
-            "mid": self.cursor.lastrowid,
+            "mid": mid,
             "client_mid": client_mid,
             "sender_uid": sender_uid,
             "receiver_uid": receiver_uid,
