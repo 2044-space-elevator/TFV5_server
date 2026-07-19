@@ -50,34 +50,38 @@ class UserDb(Db):
         """
         if stat not in ALLOWED_USER_STATS:
             return False
-
-        if not self.validate_username(username):
+        if not isinstance(username, str) or len(username) > 20 or len(username) < 4 or " " in username:
             return False
-        
-        if email and not self.validate_email(email):
+        if email and not re.fullmatch(email_regex, email):
             return False
 
-        uid = self.query("SELECT MAX(uid) from users")[0][0]
-        if uid == None:
-            uid = 0
-        else:
-            uid += 1
-        
-        pwd_hash = self.hasher.hash(password) 
+        pwd_hash = self.hasher.hash(password)
         try:
-            if email:
-                self.execute(
-                    "INSERT INTO users (uid, username, pwd_hash, create_time, email, stat) VALUES (?, ?, ?, ?, ?, ?)",
-                    (uid, username, pwd_hash, create_time, email, stat)
-                )
-            else:
-                self.execute(
-                    "INSERT INTO users (uid, username, pwd_hash, create_time, stat) VALUES (?, ?, ?, ?, ?)",
-                    (uid, username, pwd_hash, create_time, stat)
-                )
-            return True
+            with self.lock:
+                def operation():
+                    if not self._validate_username_locked(username):
+                        return False
+                    if email and not self._validate_email_locked(email):
+                        return False
+                    self.cursor.execute("SELECT COALESCE(MAX(uid), -1) + 1 FROM users")
+                    uid = self.cursor.fetchone()[0]
+                    if email:
+                        self.cursor.execute(
+                            "INSERT INTO users (uid, username, pwd_hash, create_time, email, stat) VALUES (?, ?, ?, ?, ?, ?)",
+                            (uid, username, pwd_hash, create_time, email, stat),
+                        )
+                    else:
+                        self.cursor.execute(
+                            "INSERT INTO users (uid, username, pwd_hash, create_time, stat) VALUES (?, ?, ?, ?, ?)",
+                            (uid, username, pwd_hash, create_time, stat),
+                        )
+                    self.conn.commit()
+                    return True
+
+                return self._execute_with_retry(operation)
         except Exception as e:
             print(e)
+            return False
 
     def uid_query(self, uid : int):
         """

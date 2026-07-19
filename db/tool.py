@@ -62,8 +62,10 @@ class Db:
                     self.cursor.execute(command, parameters)
                 else:
                     self.cursor.execute(command)
+                lastrowid = self.cursor.lastrowid
                 self.conn.commit()
-            self._execute_with_retry(operation)
+                return lastrowid
+            return self._execute_with_retry(operation)
 
     def __enter__(self):
         return self

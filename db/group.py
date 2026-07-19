@@ -3,6 +3,9 @@ import json
 import time
 
 
+GROUP_MEMBERS_MIGRATION = "group_members_v1"
+
+
 class GroupDb(Db):
     def __init__(self, path: str, port_api: int, config_reader=None):
         super().__init__(path, port_api, -1)
@@ -49,47 +52,141 @@ class GroupDb(Db):
             self.execute("ALTER TABLE groups ADD COLUMN require_review INTEGER NOT NULL DEFAULT 1")
         except OperationalError:
             pass
+        self.execute("""
+            CREATE TABLE IF NOT EXISTS group_members (
+                gid INTEGER NOT NULL,
+                uid INTEGER NOT NULL,
+                role INTEGER NOT NULL DEFAULT 0 CHECK(role IN (0, 1, 2)),
+                join_time REAL NOT NULL,
+                PRIMARY KEY (gid, uid)
+            )
+        """)
+        self.execute("CREATE INDEX IF NOT EXISTS idx_group_members_uid ON group_members(uid, gid)")
+        self.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at REAL NOT NULL
+            )
+        """)
+        self._migrate_legacy_members()
+
+    def _migrate_legacy_members(self):
+        with self.lock:
+            def operation():
+                self.cursor.execute(
+                    "SELECT 1 FROM schema_migrations WHERE name = ?",
+                    (GROUP_MEMBERS_MIGRATION,),
+                )
+                if self.cursor.fetchone() is not None:
+                    return False
+
+                self.cursor.execute("SELECT gid, creater, members, admins FROM groups")
+                for gid, creater, members_raw, admins_raw in self.cursor.fetchall():
+                    try:
+                        members = {int(uid) for uid in json.loads(members_raw or "[]")}
+                    except (TypeError, ValueError):
+                        members = set()
+                    try:
+                        admins = {int(uid) for uid in json.loads(admins_raw or "[]")}
+                    except (TypeError, ValueError):
+                        admins = set()
+
+                    creater = int(creater)
+                    all_members = members | admins | {creater}
+                    for member_uid in all_members:
+                        role = 2 if member_uid == creater else (1 if member_uid in admins else 0)
+                        self.cursor.execute(
+                            "INSERT OR REPLACE INTO group_members (gid, uid, role, join_time) VALUES (?, ?, ?, ?)",
+                            (gid, member_uid, role, 0),
+                        )
+
+                self.cursor.execute(
+                    "INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+                    (GROUP_MEMBERS_MIGRATION, time.time()),
+                )
+                self.conn.commit()
+                return True
+
+            return self._execute_with_retry(operation)
+
+    def _hydrate_group_rows(self, rows):
+        if not rows:
+            return []
+        gids = [row[0] for row in rows]
+        placeholders = ",".join("?" * len(gids))
+        params = tuple(gids)
+
+        member_rows = self.query(
+            f"SELECT gid, uid FROM group_members WHERE gid IN ({placeholders}) ORDER BY gid, join_time ASC, uid ASC",
+            params,
+        )
+        member_map = {}
+        for gid, uid in member_rows:
+            member_map.setdefault(gid, []).append(uid)
+
+        admin_rows = self.query(
+            f"SELECT gid, uid FROM group_members WHERE gid IN ({placeholders}) AND role = 1 ORDER BY gid, join_time ASC, uid ASC",
+            params,
+        )
+        admin_map = {}
+        for gid, uid in admin_rows:
+            admin_map.setdefault(gid, []).append(uid)
+
+        hydrated = []
+        for row in rows:
+            gid = row[0]
+            r = list(row)
+            r[3] = json.dumps(member_map.get(gid, []))
+            r[4] = json.dumps(admin_map.get(gid, []))
+            hydrated.append(tuple(r))
+        return hydrated
 
     def query_gid(self, gid: int):
-        return self.query("SELECT * FROM groups WHERE gid = ?", (gid,))
+        rows = self.query("SELECT * FROM groups WHERE gid = ?", (gid,))
+        return self._hydrate_group_rows(rows)
 
     def query_creater(self, uid: int):
-        return self.query("SELECT * FROM groups WHERE creater = ?", (uid,))
+        rows = self.query("SELECT * FROM groups WHERE creater = ?", (uid,))
+        return self._hydrate_group_rows(rows)
 
     def groupname_search(self, groupname: str):
-        return self.query("SELECT * FROM groups WHERE groupname LIKE ?",
-                          ('%' + groupname + '%',))
+        rows = self.query(
+            "SELECT * FROM groups WHERE groupname LIKE ?",
+            ('%' + groupname + '%',),
+        )
+        return self._hydrate_group_rows(rows)
 
     def get_member_uids(self, gid: int) -> list:
-        row = self.query_gid(gid)
-        if not row:
-            return []
-        return json.loads(row[0][3])
+        rows = self.query(
+            "SELECT uid FROM group_members WHERE gid = ? ORDER BY join_time ASC, uid ASC",
+            (gid,),
+        )
+        return [row[0] for row in rows]
 
     def get_admin_uids(self, gid: int) -> list:
-        row = self.query_gid(gid)
-        if not row:
-            return []
-        return json.loads(row[0][4])
+        rows = self.query(
+            "SELECT uid FROM group_members WHERE gid = ? AND role = 1 ORDER BY join_time ASC, uid ASC",
+            (gid,),
+        )
+        return [row[0] for row in rows]
 
     def is_admin(self, gid: int, uid: int) -> int:
-        """0=member, 1=admin, 2=owner."""
-        row = self.query_gid(gid)
-        if not row:
-            return 0
-        creater, admins = row[0][1], json.loads(row[0][4])
-        if uid == creater:
-            return 2
-        if uid in admins:
-            return 1
-        return 0
+        """0=member or non-member, 1=admin, 2=owner."""
+        rows = self.query(
+            "SELECT role FROM group_members WHERE gid = ? AND uid = ?",
+            (gid, uid),
+        )
+        return rows[0][0] if rows else 0
 
     def is_member(self, gid: int, uid: int) -> bool:
-        members = self.get_member_uids(gid)
-        return uid in members
+        rows = self.query(
+            "SELECT 1 FROM group_members WHERE gid = ? AND uid = ?",
+            (gid, uid),
+        )
+        return bool(rows)
 
     def get_group_settings(self, gid: int) -> dict:
-        row = self.query_gid(gid)
+        row = self.query("SELECT * FROM groups WHERE gid = ?", (gid,))
         if not row:
             return {}
         r = row[0]
@@ -100,16 +197,13 @@ class GroupDb(Db):
         }
 
     def get_user_group_rows(self, uid: int) -> list:
-        rows = self.query("SELECT * FROM groups")
-        result = []
-        for row in rows:
-            try:
-                members = json.loads(row[3])
-            except Exception:
-                continue
-            if uid in members:
-                result.append(row)
-        return result
+        rows = self.query(
+            """SELECT g.* FROM groups g
+               INNER JOIN group_members gm ON gm.gid = g.gid
+               WHERE gm.uid = ? ORDER BY g.gid ASC""",
+            (uid,),
+        )
+        return self._hydrate_group_rows(rows)
 
     def get_user_groups(self, uid: int) -> list:
         return [
@@ -121,105 +215,134 @@ class GroupDb(Db):
                      introduction: str, allow_direct_join: bool = False,
                      require_review: bool = True) -> int:
         cfg = self._config_reader()
-        created = self.query_creater(creater)
         limit = cfg.get("groups_limit", 30)
-        if limit != -1 and len(created) >= limit:
-            return 0
 
-        gid = self.query("SELECT COALESCE(MAX(gid), 0) FROM groups")[0][0] + 1
-        self.execute(
-            """INSERT INTO groups (gid, creater, groupname, members, admins,
-               enter_hint, introduction, allow_direct_join, require_review)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (gid, creater, groupname, json.dumps([creater]), json.dumps([]),
-             enter_hint, introduction,
-             int(allow_direct_join), int(require_review))
-        )
-        return gid
+        with self.lock:
+            def operation():
+                self.cursor.execute("SELECT COUNT(*) FROM groups WHERE creater = ?", (creater,))
+                if limit != -1 and self.cursor.fetchone()[0] >= limit:
+                    return 0
+                self.cursor.execute("SELECT COALESCE(MAX(gid), 0) + 1 FROM groups")
+                gid = self.cursor.fetchone()[0]
+                self.cursor.execute(
+                    """INSERT INTO groups (gid, creater, groupname,
+                       enter_hint, introduction, allow_direct_join, require_review)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (gid, creater, groupname, enter_hint, introduction,
+                     int(allow_direct_join), int(require_review)),
+                )
+                self.cursor.execute(
+                    "INSERT INTO group_members (gid, uid, role, join_time) VALUES (?, ?, 2, ?)",
+                    (gid, creater, time.time()),
+                )
+                self.conn.commit()
+                return gid
+
+            return self._execute_with_retry(operation)
 
     def delete_group(self, gid: int):
-        self.execute("DELETE FROM join_requests WHERE gid = ?", (gid,))
-        self.execute("DELETE FROM groups WHERE gid = ?", (gid,))
+        with self.lock:
+            def operation():
+                self.cursor.execute("DELETE FROM join_requests WHERE gid = ?", (gid,))
+                self.cursor.execute("DELETE FROM group_members WHERE gid = ?", (gid,))
+                self.cursor.execute("DELETE FROM groups WHERE gid = ?", (gid,))
+                deleted = self.cursor.rowcount > 0
+                self.conn.commit()
+                return deleted
+
+            return self._execute_with_retry(operation)
 
     def add_member(self, gid: int, new_member: int) -> bool:
-        row = self.query_gid(gid)
-        if not row:
-            return False
-        members = json.loads(row[0][3])
-        if new_member in members:
-            return False
-
         cfg = self._config_reader()
         limit = cfg.get("single_group_max_people", 200)
-        if limit != -1 and len(members) >= limit:
-            return False
+        with self.lock:
+            def operation():
+                self.cursor.execute("SELECT 1 FROM groups WHERE gid = ?", (gid,))
+                if self.cursor.fetchone() is None:
+                    return False
+                self.cursor.execute(
+                    "SELECT 1 FROM group_members WHERE gid = ? AND uid = ?",
+                    (gid, new_member),
+                )
+                if self.cursor.fetchone() is not None:
+                    return False
+                self.cursor.execute("SELECT COUNT(*) FROM group_members WHERE gid = ?", (gid,))
+                if limit != -1 and self.cursor.fetchone()[0] >= limit:
+                    return False
+                self.cursor.execute(
+                    "INSERT INTO group_members (gid, uid, role, join_time) VALUES (?, ?, 0, ?)",
+                    (gid, new_member, time.time()),
+                )
+                self.conn.commit()
+                return True
 
-        members.append(new_member)
-        self.execute("UPDATE groups SET members = ? WHERE gid = ?",
-                     (json.dumps(members), gid))
-        return True
+            return self._execute_with_retry(operation)
 
     def remove_member(self, gid: int, member: int) -> bool:
-        row = self.query_gid(gid)
-        if not row:
-            return False
-        creater, members, admins = row[0][1], json.loads(row[0][3]), json.loads(row[0][4])
-        if member not in members:
-            return False
-        if creater == member:
-            return False  # tf owner 必须保留
-        members.remove(member)
-        if member in admins:
-            admins.remove(member)
-            self.execute("UPDATE groups SET admins = ? WHERE gid = ?",
-                         (json.dumps(admins), gid))
-        self.execute("UPDATE groups SET members = ? WHERE gid = ?",
-                     (json.dumps(members), gid))
-        return True
+        with self.lock:
+            def operation():
+                self.cursor.execute(
+                    "DELETE FROM group_members WHERE gid = ? AND uid = ? AND role < 2",
+                    (gid, member),
+                )
+                removed = self.cursor.rowcount > 0
+                self.conn.commit()
+                return removed
+
+            return self._execute_with_retry(operation)
+
     def add_admin(self, gid: int, uid: int) -> bool:
-        row = self.query_gid(gid)
-        if not row:
-            return False
-        creater, members, admins = row[0][1], json.loads(row[0][3]), json.loads(row[0][4])
-        if uid == creater or uid not in members or uid in admins:
-            return False
-        admins.append(uid)
-        self.execute("UPDATE groups SET admins = ? WHERE gid = ?",
-                     (json.dumps(admins), gid))
-        return True
+        with self.lock:
+            def operation():
+                self.cursor.execute(
+                    "UPDATE group_members SET role = 1 WHERE gid = ? AND uid = ? AND role = 0",
+                    (gid, uid),
+                )
+                changed = self.cursor.rowcount > 0
+                self.conn.commit()
+                return changed
+
+            return self._execute_with_retry(operation)
 
     def remove_admin(self, gid: int, uid: int) -> bool:
-        row = self.query_gid(gid)
-        if not row:
-            return False
-        admins = json.loads(row[0][4])
-        if uid not in admins:
-            return False
-        admins.remove(uid)
-        self.execute("UPDATE groups SET admins = ? WHERE gid = ?",
-                     (json.dumps(admins), gid))
-        return True
+        with self.lock:
+            def operation():
+                self.cursor.execute(
+                    "UPDATE group_members SET role = 0 WHERE gid = ? AND uid = ? AND role = 1",
+                    (gid, uid),
+                )
+                changed = self.cursor.rowcount > 0
+                self.conn.commit()
+                return changed
+
+            return self._execute_with_retry(operation)
 
     def transfer_owner(self, gid: int, old_owner: int, new_owner: int) -> bool:
-        row = self.query_gid(gid)
-        if not row:
-            return False
-        creater = row[0][1]
-        if creater != old_owner:
-            return False
-        members = json.loads(row[0][3])
-        if new_owner not in members:
-            return False
-        admins = json.loads(row[0][4])
-        if new_owner in admins:
-            admins.remove(new_owner)
-        if old_owner not in admins:
-            admins.append(old_owner)
-        self.execute("UPDATE groups SET creater = ?, admins = ? WHERE gid = ?",
-                     (new_owner, json.dumps(admins), gid))
-        return True
+        with self.lock:
+            def operation():
+                self.cursor.execute("SELECT creater FROM groups WHERE gid = ?", (gid,))
+                group = self.cursor.fetchone()
+                if not group or group[0] != old_owner:
+                    return False
+                self.cursor.execute(
+                    "SELECT role FROM group_members WHERE gid = ? AND uid = ?",
+                    (gid, new_owner),
+                )
+                if self.cursor.fetchone() is None:
+                    return False
+                self.cursor.execute(
+                    "UPDATE group_members SET role = 1 WHERE gid = ? AND uid = ?",
+                    (gid, old_owner),
+                )
+                self.cursor.execute(
+                    "UPDATE group_members SET role = 2 WHERE gid = ? AND uid = ?",
+                    (gid, new_owner),
+                )
+                self.cursor.execute("UPDATE groups SET creater = ? WHERE gid = ?", (new_owner, gid))
+                self.conn.commit()
+                return True
 
-    # --- group settings ---
+            return self._execute_with_retry(operation)
 
     def update_settings(self, gid: int, **kwargs) -> bool:
         allowed = {"groupname", "enter_hint", "introduction",
@@ -234,31 +357,36 @@ class GroupDb(Db):
         set_clause = ", ".join("{} = ?".format(k) for k in updates)
         self.execute(
             "UPDATE groups SET {} WHERE gid = ?".format(set_clause),
-            tuple(updates.values()) + (gid,)
+            tuple(updates.values()) + (gid,),
         )
         return True
 
-
     def request_join(self, gid: int, uid: int, inviter_uid: int = 0) -> int:
-        """创建一个加入请求，如果已经存在 pending 请求则返回现有请求的 rid，否则创建新请求并返回新 rid。"""
-        existing = self.query(
-            "SELECT rid FROM join_requests WHERE gid = ? AND uid = ? AND status = 'pending'",
-            (gid, uid)
-        )
-        if existing:
-            return existing[0][0]
-        self.execute(
-            """INSERT INTO join_requests (gid, uid, inviter_uid, status, request_time)
-               VALUES (?, ?, ?, 'pending', ?)""",
-            (gid, uid, inviter_uid, time.time())
-        )
-        return self.cursor.lastrowid
+        with self.lock:
+            def operation():
+                self.cursor.execute(
+                    "SELECT rid FROM join_requests WHERE gid = ? AND uid = ? AND status = 'pending'",
+                    (gid, uid),
+                )
+                existing = self.cursor.fetchone()
+                if existing:
+                    return existing[0]
+                self.cursor.execute(
+                    """INSERT INTO join_requests (gid, uid, inviter_uid, status, request_time)
+                       VALUES (?, ?, ?, 'pending', ?)""",
+                    (gid, uid, inviter_uid, time.time()),
+                )
+                rid = self.cursor.lastrowid
+                self.conn.commit()
+                return rid
+
+            return self._execute_with_retry(operation)
 
     def get_join_requests(self, gid: int, status: str = 'pending') -> list:
         rows = self.query(
             """SELECT rid, gid, uid, inviter_uid, status, request_time
                FROM join_requests WHERE gid = ? AND status = ? ORDER BY request_time DESC""",
-            (gid, status)
+            (gid, status),
         )
         return [
             {"rid": r[0], "gid": r[1], "uid": r[2], "inviter_uid": r[3],
@@ -267,48 +395,66 @@ class GroupDb(Db):
         ]
 
     def handle_join_request(self, rid: int, approved: bool) -> bool:
-        row = self.query(
-            "SELECT gid, uid, status FROM join_requests WHERE rid = ?", (rid,)
-        )
-        if not row or row[0][2] != 'pending':
-            return False
-        gid, uid = row[0][0], row[0][1]
-        if not approved:
-            self.execute("UPDATE join_requests SET status = 'rejected' WHERE rid = ?", (rid,))
-            return True
-        if not self.add_member(gid, uid):
-            return False
-        self.execute("UPDATE join_requests SET status = 'approved' WHERE rid = ?", (rid,))
-        return True
+        cfg = self._config_reader()
+        limit = cfg.get("single_group_max_people", 200)
+        with self.lock:
+            def operation():
+                self.cursor.execute(
+                    "SELECT gid, uid, status FROM join_requests WHERE rid = ?",
+                    (rid,),
+                )
+                request = self.cursor.fetchone()
+                if not request or request[2] != 'pending':
+                    return False
+                gid, uid = request[0], request[1]
+                if not approved:
+                    self.cursor.execute(
+                        "UPDATE join_requests SET status = 'rejected' WHERE rid = ?",
+                        (rid,),
+                    )
+                    self.conn.commit()
+                    return True
 
-    # --- user removal (admin tool) ---
+                self.cursor.execute("SELECT 1 FROM groups WHERE gid = ?", (gid,))
+                if self.cursor.fetchone() is None:
+                    return False
+                self.cursor.execute(
+                    "SELECT 1 FROM group_members WHERE gid = ? AND uid = ?",
+                    (gid, uid),
+                )
+                if self.cursor.fetchone() is not None:
+                    return False
+                self.cursor.execute("SELECT COUNT(*) FROM group_members WHERE gid = ?", (gid,))
+                if limit != -1 and self.cursor.fetchone()[0] >= limit:
+                    return False
+                self.cursor.execute(
+                    "INSERT INTO group_members (gid, uid, role, join_time) VALUES (?, ?, 0, ?)",
+                    (gid, uid, time.time()),
+                )
+                self.cursor.execute(
+                    "UPDATE join_requests SET status = 'approved' WHERE rid = ?",
+                    (rid,),
+                )
+                self.conn.commit()
+                return True
+
+            return self._execute_with_retry(operation)
 
     def remove_user_membership(self, uid: int):
         with self.lock:
             def operation():
-                self.cursor.execute("SELECT gid, creater, members, admins FROM groups")
-                groups = self.cursor.fetchall()
-                deleted_gids = []
-                for gid, creater, members_raw, admins_raw in groups:
-                    if creater == uid:
-                        self.cursor.execute("DELETE FROM join_requests WHERE gid = ?", (gid,))
-                        self.cursor.execute("DELETE FROM groups WHERE gid = ?", (gid,))
-                        deleted_gids.append(gid)
-                        continue
-                    members = json.loads(members_raw)
-                    admins = json.loads(admins_raw)
-                    changed = False
-                    if uid in members:
-                        members = [m for m in members if m != uid]
-                        changed = True
-                    if uid in admins:
-                        admins = [a for a in admins if a != uid]
-                        changed = True
-                    if changed:
-                        self.cursor.execute(
-                            "UPDATE groups SET members = ?, admins = ? WHERE gid = ?",
-                            (json.dumps(members), json.dumps(admins), gid),
-                        )
+                self.cursor.execute("SELECT gid FROM groups WHERE creater = ?", (uid,))
+                deleted_gids = [row[0] for row in self.cursor.fetchall()]
+                for gid in deleted_gids:
+                    self.cursor.execute("DELETE FROM join_requests WHERE gid = ?", (gid,))
+                    self.cursor.execute("DELETE FROM group_members WHERE gid = ?", (gid,))
+                    self.cursor.execute("DELETE FROM groups WHERE gid = ?", (gid,))
+                self.cursor.execute(
+                    "DELETE FROM join_requests WHERE uid = ? OR inviter_uid = ?",
+                    (uid, uid),
+                )
+                self.cursor.execute("DELETE FROM group_members WHERE uid = ?", (uid,))
                 self.conn.commit()
                 return deleted_gids
+
             return self._execute_with_retry(operation)

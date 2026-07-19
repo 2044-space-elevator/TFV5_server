@@ -1550,8 +1550,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         hashes = req["hash"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        file.dereference_file(port_api, hashes, file_cursor)
-        return bool_res()[True]
+        return bool_res()[file.dereference_file(port_api, uid, hashes, file_cursor)]
 
     @api('/file/get_user_files', methods=['POST'])
     def get_user_files(req):
@@ -1594,8 +1593,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         hashes = req["hash"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        file.delete_user_file(port_api, uid, hashes, file_cursor)
-        return bool_res()[True]
+        return bool_res()[file.delete_user_file(port_api, uid, hashes, file_cursor)]
 
     @api('/file/admin_get_all_files', methods=['POST'])
     def admin_get_all_files(req):
@@ -1862,8 +1860,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if group_info:
             group_info = group_info[0]
             group_name = group_info[2]
-            raw_uids = json.loads(group_info[3]) + json.loads(group_info[4]) + [group_info[1]]
-            target_uids = list(set(raw_uids))
+            target_uids = group_cursor.get_member_uids(gid)
         else:
             group_name = str(gid)
             target_uids = []
@@ -2188,11 +2185,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 notif["file_hash"] = file_hash
 
             if group_id:
-                ginfo = group_cursor.query_gid(group_id)
-                if ginfo:
-                    members = json.loads(ginfo[0][3])
-                    for user in members:
-                        instant_contact.notify_user(user, notif)
+                for user in group_cursor.get_member_uids(group_id):
+                    instant_contact.notify_user(user, notif)
             else:
                 recv_notif = dict(notif)
                 recv_notif["room_id"] = "U{}".format(uid)

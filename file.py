@@ -49,22 +49,25 @@ def upload_file(port_api : int, uid : int, file_b64 : str, file_name : str, file
             os.remove(tmp_path)
     return hashes
 
-def dereference_file(port_api : int, hashes : str, file_cursor : FileDb):
-    file_cursor.decrement_ref(hashes)
+def dereference_file(port_api : int, uid : int, hashes : str, file_cursor : FileDb):
+    if not file_cursor.decrement_owned_ref(uid, hashes):
+        return False
     qry = file_cursor.lose_effect()
     for tmp in qry:
         tmp_path = file_path(port_api, tmp[3])
         if os.path.isfile(tmp_path):
             os.remove(tmp_path)
+    return True
 
 def delete_user_file(port_api : int, uid : int, hashes : str, file_cursor : FileDb):
-    file_cursor.deactivate_user_file(uid, hashes)
-    deleted = file_cursor.decrement_upload_user_count(hashes)
+    succeeded, deleted = file_cursor.delete_owned_user_file(uid, hashes)
+    if not succeeded:
+        return False
     for row in deleted:
         tmp_path = file_path(port_api, row[3])
         if os.path.isfile(tmp_path):
             os.remove(tmp_path)
-    return len(deleted) > 0
+    return True
 
 def clean_user_files(port_api : int, uid : int, file_cursor : FileDb):
     rows = file_cursor.clean_sender_files(uid) or []

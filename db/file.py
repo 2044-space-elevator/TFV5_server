@@ -66,6 +66,37 @@ class FileDb(Db):
     def deactivate_user_file(self, uid : int, hashes : str):
         self.execute("UPDATE user_file SET active = FALSE WHERE uid = ? AND hash = ?", (uid, hashes))
 
+    def delete_owned_user_file(self, uid : int, hashes : str):
+        with self.lock:
+            def operation():
+                self.cursor.execute(
+                    "SELECT 1 FROM user_file WHERE uid = ? AND hash = ? AND active = TRUE",
+                    (uid, hashes),
+                )
+                if self.cursor.fetchone() is None:
+                    return False, []
+
+                self.cursor.execute(
+                    "UPDATE user_file SET active = FALSE WHERE uid = ? AND hash = ?",
+                    (uid, hashes),
+                )
+                self.cursor.execute(
+                    "UPDATE file SET upload_user_count = MAX(upload_user_count - 1, 0) WHERE hash = ?",
+                    (hashes,),
+                )
+                self.cursor.execute(
+                    "SELECT * FROM file WHERE hash = ? AND upload_user_count <= 0",
+                    (hashes,),
+                )
+                deleted = self.cursor.fetchall()
+                if deleted:
+                    self.cursor.execute("DELETE FROM file WHERE hash = ?", (hashes,))
+                    self.cursor.execute("DELETE FROM user_file WHERE hash = ?", (hashes,))
+                self.conn.commit()
+                return True, deleted
+
+            return self._execute_with_retry(operation)
+
     def get_user_files(self, uid : int):
         return self.query(
             "SELECT uf.hash, uf.file_name, uf.upload_time, f.size, f.ref_count, f.upload_user_count "
@@ -98,6 +129,25 @@ class FileDb(Db):
     def decrement_ref(self, hashes : str):
         now = time.time()
         self.execute("UPDATE file SET ref_count = MAX(ref_count - 1, 0), last_ref_time = ? WHERE hash = ?", (now, hashes))
+
+    def decrement_owned_ref(self, uid : int, hashes : str):
+        with self.lock:
+            def operation():
+                self.cursor.execute(
+                    "SELECT 1 FROM user_file WHERE uid = ? AND hash = ? AND active = TRUE",
+                    (uid, hashes),
+                )
+                if self.cursor.fetchone() is None:
+                    return False
+                self.cursor.execute(
+                    "UPDATE file SET ref_count = MAX(ref_count - 1, 0), last_ref_time = ? WHERE hash = ?",
+                    (time.time(), hashes),
+                )
+                changed = self.cursor.rowcount > 0
+                self.conn.commit()
+                return changed
+
+            return self._execute_with_retry(operation)
 
     def increment_upload_user_count(self, hashes : str):
         with self.lock:
