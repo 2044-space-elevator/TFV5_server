@@ -303,29 +303,6 @@ TFV5 在 WebSocket 中支持发送文本和文件消息，可带引用。
 
 错误码包括：`not_friends`、`not_group_member`、`rate_limited`、`message_too_long`、`invalid_quote`、`invalid_target`、`group_not_found`、`banned`。详见[消息文档](message.md)。
 
-### 已读回执（message.read）
-
-客户端可发送已读回执，服务端广播给聊天室内其他在线成员：
-
-请求：
-```json
-{
-    “type” : “message.read”,
-    “room_id” : “<room_id>”,
-    “last_mid” : <last_read_mid>
-}
-```
-
-广播：
-```json
-{
-    “type” : “message.read”,
-    “room_id” : “<room_id>”,
-    “uid” : <reader_uid>,
-    “last_mid” : <last_read_mid>
-}
-```
-
 ### 输入状态（typing.start / typing.stop）
 
 客户端发送输入状态，服务端广播给聊天室内其他在线成员（群聊时不广播给自己）：

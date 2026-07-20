@@ -394,35 +394,6 @@ class InstantConnect():
                     else:
                         self._queue_ack(websocket, client_mid, status="failed", error="invalid_target")
 
-                elif message["type"] == "message.read":
-                    room_id = message["room_id"]
-                    last_mid = message["last_mid"]
-                    sender_uid = self.clients_belonged[websocket]
-                    if not can_access_room(self.user_cursor, self.group_cursor, sender_uid, room_id):
-                        continue
-                    broadcast = {
-                        "type": "message.read",
-                        "room_id": room_id,
-                        "uid": sender_uid,
-                        "last_mid": last_mid,
-                    }
-                    if room_id.startswith('U'):
-                        target = int(room_id[1:])
-                        with self._clients_lock:
-                            clients = list(self.connected_clients.get(target, []))
-                        for ws in clients:
-                            asyncio.run_coroutine_threadsafe(
-                                self._queue_message(ws, broadcast), self.loop)
-                    elif room_id.startswith('G'):
-                        gid = int(room_id[1:])
-                        members = self.group_cursor.get_member_uids(gid)
-                        for user in members:
-                            with self._clients_lock:
-                                clients = list(self.connected_clients.get(user, []))
-                            for ws in clients:
-                                asyncio.run_coroutine_threadsafe(
-                                    self._queue_message(ws, broadcast), self.loop)
-
                 elif message["type"] in ("typing.start", "typing.stop"):
                     if not self._check_ws_rate(sender_uid, max_per_second=20, bucket="typing"):
                         continue

@@ -5,7 +5,7 @@
 TFV5 的消息系统由两部分组成：
 
 1. **REST API**：发送消息、查询聊天列表、拉取历史消息。
-2. **WebSocket 实时推送**：发送和接收即时消息、已读回执、输入状态提示。
+2. **WebSocket 实时推送**：发送和接收即时消息、输入状态提示。
 
 消息在服务端持久化存储，通过 `mid`（消息ID）唯一标识。客户端可通过 `client_mid` 实现去重和发送确认。
 
@@ -341,37 +341,6 @@ TFV5 的消息系统由两部分组成：
 - `<group_id>`：群聊时存在，为群 gid。私聊时无此字段。
 - `<sender_id>`：私聊为 `"U<uid>"`，群聊为 `"G<gid>U<uid>"`。
 - `<meta>`：引用的消息 `mid`。
-
----
-
-### 已读回执
-
-客户端可发送已读回执，服务端会广播给聊天室内其他在线成员：
-
-请求（secret 加密后）：
-
-```json
-{
-    "type" : "message.read",
-    "room_id" : "<room_id>",
-    "last_mid" : <last_read_mid>
-}
-```
-
-其中 `<room_id>` 为 `"U<uid>"` 或 `"G<gid>"`，`<last_read_mid>` 为已读的最后一条消息 `mid`。
-
-广播（secret 加密后）：
-
-```json
-{
-    "type" : "message.read",
-    "room_id" : "<room_id>",
-    "uid" : <reader_uid>,
-    "last_mid" : <last_read_mid>
-}
-```
-
----
 
 ### 输入状态
 
