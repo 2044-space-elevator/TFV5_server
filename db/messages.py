@@ -37,6 +37,10 @@ class MessagesDb(Db):
 
     def _create_indexes(self):
         from sqlite3 import OperationalError
+        try:
+            self.execute("DROP INDEX IF EXISTS idx_messages_client_mid")
+        except Exception:
+            pass
         indexes = [
             """CREATE INDEX IF NOT EXISTS idx_messages_conversation
                ON messages(sender_uid, receiver_uid, send_time DESC)""",
@@ -44,8 +48,8 @@ class MessagesDb(Db):
                ON messages(receiver_uid, send_time DESC)""",
             """CREATE INDEX IF NOT EXISTS idx_messages_group
                ON messages(group_id, send_time DESC)""",
-            """CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_client_mid
-               ON messages(client_mid) WHERE client_mid IS NOT NULL""",
+            """CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_sender_client_mid
+               ON messages(sender_uid, client_mid) WHERE client_mid IS NOT NULL""",
         ]
         for idx_sql in indexes:
             try:
@@ -77,8 +81,8 @@ class MessagesDb(Db):
                     self.conn.rollback()
                     if client_mid:
                         self.cursor.execute(
-                            "SELECT mid FROM messages WHERE client_mid = ?",
-                            (client_mid,),
+                            "SELECT mid FROM messages WHERE sender_uid = ? AND client_mid = ?",
+                            (sender_uid, client_mid),
                         )
                         existing = self.cursor.fetchone()
                         if existing:

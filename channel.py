@@ -321,8 +321,9 @@ class InstantConnect():
                     if quote >= 0 and not self._verify_quote(quote, send_to, self.clients_belonged[websocket]):
                         self._queue_ack(websocket, client_mid, status="failed", error="invalid_quote")
                         continue
-                    if len(file_hashes) > self.max_message_length:
-                        self._queue_ack(websocket, client_mid, status="failed", error="message_too_long")
+                    # hyw
+                    if not isinstance(file_hashes, str) or len(file_hashes) != 64 or not all(c in '0123456789abcdefABCDEF' for c in file_hashes):
+                        self._queue_ack(websocket, client_mid, status="failed", error="invalid_file_hash")
                         continue
                     if send_to[0] == 'U':
                         # 发送给用户

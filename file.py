@@ -24,7 +24,7 @@ def init(port_api : int):
 def file_path(port_api : int, hashes : str):
     return "res/{}/file/{}.file".format(port_api, hashes)
 
-def upload_file(port_api : int, uid : int, file_b64 : str, file_name : str, file_cursor : FileDb):
+def upload_file(port_api : int, uid : int, file_b64 : str, file_name : str, file_cursor : FileDb, file_last_time : float = 72.0):
     content = base64.b64decode(file_b64)
     file_size = len(content)
     hashes = sha256(content)
@@ -32,27 +32,42 @@ def upload_file(port_api : int, uid : int, file_b64 : str, file_name : str, file
     already_owned = file_cursor.has_active_user_file(uid, hashes)
 
     if file_cursor.file_exists(hashes):
-        file_cursor.increment_ref(hashes)
         if not already_owned:
+            file_cursor.increment_ref(hashes)
             file_cursor.increment_upload_user_count(hashes)
     else:
-        with open(file_path(port_api, hashes), "wb") as file:
-            file.write(content)
-        file_cursor.tag_file(uid, file_name, time.time(), hashes, file_size)
+        disk_path = file_path(port_api, hashes)
+        try:
+            with open(disk_path, "wb") as file:
+                file.write(content)
+        except Exception:
+            raise
+        try:
+            # 并发修复
+            file_cursor.tag_file(uid, file_name, time.time(), hashes, file_size)
+        except Exception:
+            if os.path.isfile(disk_path):
+                os.remove(disk_path)
+            raise
 
-    file_cursor.add_user_file(uid, hashes, file_name, time.time())
+    try:
+        file_cursor.add_user_file(uid, hashes, file_name, time.time())
+    except Exception:
+        if not already_owned and file_cursor.file_exists(hashes):
+            file_cursor.decrement_ref(hashes)
+        raise
 
-    qry = file_cursor.lose_effect()
+    qry = file_cursor.lose_effect(file_last_time)
     for tmp in qry:
         tmp_path = file_path(port_api, tmp[3])
         if os.path.isfile(tmp_path):
             os.remove(tmp_path)
     return hashes
 
-def dereference_file(port_api : int, uid : int, hashes : str, file_cursor : FileDb):
+def dereference_file(port_api : int, uid : int, hashes : str, file_cursor : FileDb, file_last_time : float = 72.0):
     if not file_cursor.decrement_owned_ref(uid, hashes):
         return False
-    qry = file_cursor.lose_effect()
+    qry = file_cursor.lose_effect(file_last_time)
     for tmp in qry:
         tmp_path = file_path(port_api, tmp[3])
         if os.path.isfile(tmp_path):

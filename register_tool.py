@@ -107,6 +107,8 @@ def email_code(sender_email : str, port_api : int, email : str, password : str, 
     return send_email(session, sender, email, "{} 验证码".format(server_name), "欢迎使用 {}，您的验证码是 {}。".format(server_name, verify_code))
 
 def verify_email(port_api : int, email : str, code : int, lock):
+    if not isinstance(code, int) or code < 0:
+        return False
     folder_path = "res/{}/".format(port_api)
     with lock:
         with open(folder_path + '/activate.json', 'r+') as file:
@@ -115,10 +117,9 @@ def verify_email(port_api : int, email : str, code : int, lock):
                 return False
             activate_code = code_lst[email]
 
-        code_lst[email] = -1
-        with open(folder_path + '/activate.json', 'w+') as file:
-            json.dump(code_lst, file)
-    
-    if activate_code == code:
-        return True
-    return False
+        if activate_code == code:
+            del code_lst[email]
+            with open(folder_path + '/activate.json', 'w+') as file:
+                json.dump(code_lst, file)
+            return True
+        return False

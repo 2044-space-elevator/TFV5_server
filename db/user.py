@@ -235,7 +235,8 @@ class UserDb(Db):
         relationship TEXT CHECK(relationship IN ('pending', 'friend', 'blocked')) DEFAULT 'pending',
         adder INTEGER NOT NULL,
         blocked_by_user1 BOOLEAN,
-        blocked_by_user2 BOOLEAN
+        blocked_by_user2 BOOLEAN,
+        UNIQUE(user1, user2)
     )
     """
         """
@@ -244,7 +245,12 @@ class UserDb(Db):
         被拉黑的不再有请求成为好友的权限
         """
         self.execute(cmd)
-    
+        # #26: 为已有数据库补建唯一索引，防止并发重复插入
+        try:
+            self.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_friendship_pair ON friendship(user1, user2)")
+        except Exception:
+            pass
+
     def query_relationship(self, uida, uidb):
         if uida > uidb:
             uida, uidb = uidb, uida
