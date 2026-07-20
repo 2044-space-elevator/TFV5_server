@@ -167,7 +167,10 @@ class ForumDb(Db):
         def add_post_bucket(comments):
             comments.setdefault(str(fid), {})[str(pid)] = {}
 
-        update_comments(self.api_pt, add_post_bucket)
+        try:
+            update_comments(self.api_pt, add_post_bucket)
+        except Exception as e:
+            print("[WARN] send_post: comments JSON 更新失败 fid={} pid={}: {}".format(fid, pid, e))
         return True
     
     def pin_post(self, fid : int, pid : int):
@@ -236,17 +239,26 @@ class ForumDb(Db):
     def delete_post(self, fid : int, pid : int):
         if not self.query_post_pid(fid, pid):
             return
-        self.execute("DELETE FROM contents where pid = ?", (pid,))
-        self.execute(
-            "UPDATE forums set post_num = CASE WHEN post_num > 0 THEN post_num - 1 ELSE 0 END where fid = ?",
-            (fid,)
-        )
+        def do_delete():
+            self.cursor.execute("DELETE FROM contents where pid = ?", (pid,))
+            self.cursor.execute(
+                "UPDATE forums set post_num = CASE WHEN post_num > 0 THEN post_num - 1 ELSE 0 END where fid = ?",
+                (fid,)
+            )
+            self.conn.commit()
+
+        with self.lock:
+            self._execute_with_retry(do_delete)
+
         def remove_post_bucket(comments):
             forum_comments = comments.get(str(fid))
             if isinstance(forum_comments, dict):
                 forum_comments.pop(str(pid), None)
 
-        update_comments(self.api_pt, remove_post_bucket)
+        try:
+            update_comments(self.api_pt, remove_post_bucket)
+        except Exception as e:
+            print("[WARN] delete_post: comments JSON 更新失败 fid={} pid={}: {}".format(fid, pid, e))
 
     def clean_user_content(self, uid : int):
         uid = int(uid)

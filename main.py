@@ -272,7 +272,7 @@ def main(args=None):
     PORT_TCP = int(PORT_TCP)
     if not (0 <= PORT_API <= 65535 and 0 <= PORT_TCP <= 65535):
         prt("端口不符合要求！", "red")
-        raise
+        sys.exit(1)
     print("服务器在 PORT_API={}, PORT_TCP={} 上部署。".format(PORT_API, PORT_TCP))
 
     PUB_KEY = load_pub("res/{}/secret/pub.pem".format(PORT_API))

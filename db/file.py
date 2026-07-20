@@ -50,7 +50,7 @@ class FileDb(Db):
 
     def tag_file(self, sender : int, file_name : str, send_time : str, hashes : str, size : int = 0):
         self.execute(
-            "INSERT into file (sender, file_name, send_time, hash, active, ref_count, last_ref_time, size, upload_user_count) VALUES (?, ?, ?, ?, TRUE, 1, ?, ?, 1)",
+            "INSERT OR IGNORE into file (sender, file_name, send_time, hash, active, ref_count, last_ref_time, size, upload_user_count) VALUES (?, ?, ?, ?, TRUE, 1, ?, ?, 1)",
             (sender, file_name, send_time, hashes, send_time, size))
 
     def add_user_file(self, uid : int, hashes : str, file_name : str, upload_time : float):
@@ -173,10 +173,8 @@ class FileDb(Db):
         result = self.query("SELECT hash FROM file WHERE hash = ?", (hashes,))
         return bool(result)
 
-    def lose_effect(self):
-        time_end = time.time()
-        with open("res/{}/config.json".format(self.api_pt), "r+") as file:
-            time_end -= json.load(file)["file_last_time"] * 3600
+    def lose_effect(self, file_last_time: float = 72.0):
+        time_end = time.time() - file_last_time * 3600
         with self.lock:
             def operation():
                 deleted = []

@@ -125,6 +125,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             "max_message_length" : cfg.get("max_message_length", 10000),
             "min_group_name_length" : cfg.get("min_group_name_length", 1),
             "max_group_name_length" : cfg.get("max_group_name_length", 50),
+            "max_sign_length" : cfg.get("max_sign_length", 100),
+            "max_introduction_length" : cfg.get("max_introduction_length", 500),
+            "max_post_content_length" : cfg.get("max_post_content_length", 20000),
             "email_activate" : bool(cfg.get("email_activate")),
             "default_asset_urls" : {
                 "logo" : "/avatar/get_logo",
@@ -783,6 +786,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         new_sign = req["new_sign"]
+        max_sign = read_config().get("max_sign_length", 100)
+        if max_sign > 0 and len(str(new_sign)) > max_sign:
+            return bool_res()[False]
         user_cursor.change_sign(uid, new_sign)
         return bool_res()[True]
     
@@ -793,6 +799,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         new_intro = req["new_introduction"]
+        # #16: 校验简介长度
+        max_intro = read_config().get("max_introduction_length", 500)
+        if max_intro > 0 and len(str(new_intro)) > max_intro:
+            return bool_res()[False]
         user_cursor.change_introduction(uid, new_intro)
         return bool_res()[True]
     
@@ -913,6 +923,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if "max_group_name_length" in req:
                 updates["max_group_name_length"] = parse_int_setting(req["max_group_name_length"], minimum=1)
 
+            if "max_sign_length" in req:
+                updates["max_sign_length"] = parse_int_setting(req["max_sign_length"], minimum=1, allow_unlimited=True)
+
+            if "max_introduction_length" in req:
+                updates["max_introduction_length"] = parse_int_setting(req["max_introduction_length"], minimum=1, allow_unlimited=True)
+
+            if "max_post_content_length" in req:
+                updates["max_post_content_length"] = parse_int_setting(req["max_post_content_length"], minimum=1, allow_unlimited=True)
+
             if not updates:
                 return bool_res()[False]
 
@@ -1024,6 +1043,13 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             entry_type = fchosen.get("type", "create")
             if entry_type == "edit":
                 edit_fid = fchosen["fid"]
+                current_forum = forum_cursor.query_forum_fid(edit_fid)
+                if not current_forum:
+                    del queue[str(qid)]
+                    queue["queue_num"] = max(queue["queue_num"] - 1, 0)
+                    with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
+                        json.dump(queue, file)
+                    return bool_res()[False]
                 forum_cursor.execute(
                     "UPDATE forums SET forumname = ?, introduction = ? WHERE fid = ?",
                     (fchosen["forumname"], fchosen["introduction"], edit_fid)
@@ -1086,6 +1112,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if user_stat == 'banned':
             return bool_res()[False]
         if not query_forum(fid):
+            return bool_res()[False]
+        max_post = read_config().get("max_post_content_length", 20000)
+        if max_post > 0 and len(str(content)) > max_post:
             return bool_res()[False]
         return bool_res()[forum_cursor.send_post(fid, uid, title, content)]
 
@@ -1175,7 +1204,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not forum_info or not post_info:
             return bool_res()[False]
         creater = forum_info[0][2]
-        creater_post = post_info[0][2]
+        creater_post = post_info[0][3] # 好像 3 是 creater
         user_stat = user_cursor.uid_query(uid)[0][4]
         if not (user_stat in ["admin", "root"] or uid == creater or uid == creater_post):
             return bool_res()[False]
@@ -1245,6 +1274,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         if not user_cursor.uid_query(target_uid):
             return bool_res()[False]
+        # 避免被管理员背刺
+        if role >= operator_role and operator_role < 100:
+            return bool_res()[False]
         return bool_res()[forum_cursor.add_member(fid, target_uid, role)]
 
     @api("/forum/remove_member", methods=["POST"])
@@ -1275,7 +1307,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         operator_role = forum_cursor.get_member_role(fid, uid)
         if operator_role is None or operator_role < 50:
             return bool_res()[False]
-        if operator_role <= new_role and operator_role < 100:
+        target_role = forum_cursor.get_member_role(fid, target_uid)
+        if target_role is not None and target_role >= operator_role and operator_role < 100:
+            return bool_res()[False]
+        if new_role >= operator_role and operator_role < 100:
             return bool_res()[False]
         return bool_res()[forum_cursor.change_member_role(fid, target_uid, new_role)]
 
@@ -1532,7 +1567,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 if current_usage + new_size > quota:
                     return bool_res()[False]
         try:
-            hashes = file.upload_file(port_api, uid, file_b64, normalized_name, file_cursor)
+            hashes = file.upload_file(port_api, uid, file_b64, normalized_name, file_cursor,
+                                      cfg.get("file_last_time", 72))
         except Exception:
             return bool_res()[False]
         return json.dumps({
@@ -1550,7 +1586,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         hashes = req["hash"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        return bool_res()[file.dereference_file(port_api, uid, hashes, file_cursor)]
+        file_last_time = read_config().get("file_last_time", 72)
+        return bool_res()[file.dereference_file(port_api, uid, hashes, file_cursor, file_last_time)]
 
     @api('/file/get_user_files', methods=['POST'])
     def get_user_files(req):
@@ -1823,6 +1860,25 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             )
         return bool_res()[succeeded]
     
+    @api("/group/leave", methods=['POST'])
+    def group_leave(req):
+        """ 成员/管理员 主动退群"""
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_stat = user_cursor.uid_query(uid)[0][4]
+        if user_stat == 'banned':
+            return bool_res()[False]
+        if not group_cursor.is_member(gid, uid):
+            return bool_res()[False]
+        # 群主不可
+        if group_cursor.is_admin(gid, uid) == 2:
+            return bool_res()[False]
+        succeeded = group_cursor.remove_member(gid, uid)
+        return bool_res()[succeeded]
+
     @api("/group/remove_admin", methods=['POST'])
     def remove_admin(req):
         uid = req["uid"]
