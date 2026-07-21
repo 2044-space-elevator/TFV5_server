@@ -175,7 +175,7 @@ class InstantConnect():
             message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
             message = json.loads(message)
             if message['type'] != 'REQ.UPDATE_AES_KEY':
-                raise
+                raise ValueError("{} 而非 REQ.UPDATE_AES_KEY".format(message.get('type')))
             message["aes_key"] = base64.b64decode(message["aes_key"])
             self.aes_key[websocket] = crypto.decrypt(self.pri_key, message["aes_key"]) 
 
@@ -189,9 +189,9 @@ class InstantConnect():
             message = json.loads(message)
             message = json.loads(crypto.aes_decrypt(base64.b64decode(message['iv']), base64.b64decode(message['content']), self.aes_key[websocket]))
             if message['type'] != 'AUTH.LOGIN':
-                raise
+                raise ValueError("{} 而非 AUTH.LOGIN".format(message.get('type')))
             if not self.user_cursor.verify_user(message['uid'], message['password']):
-                raise
+                raise ValueError("UID {} 验证失败".format(message.get('uid')))
             with self._clients_lock:
                 self.connected_clients[-1].remove(websocket)
                 if not message["uid"] in self.connected_clients.keys():

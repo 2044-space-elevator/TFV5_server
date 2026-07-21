@@ -1,84 +1,140 @@
-from db.tool import Db 
+from db.tool import Db
 import json
 import time
 
 class NotificationsDb(Db):
-    def __init__(self, path : str, port_api : int):
+    def __init__(self, path: str, port_api: int):
         super().__init__(path, port_api, -1)
-    
-    def create_user_table(self, uid : int):
-        uid = int(uid)
-        cmd = """
-    CREATE TABLE IF NOT EXISTS U{} (
-        time_stamp REAL,
-        info TEXT
-    )
-    """.format(uid)
-        self.execute(cmd)
+        self._ensure_unified_table()
+        self._migrate_legacy_tables()
+
+    def _ensure_unified_table(self):
+        """统一通知表"""
+        self.execute("""
+CREATE TABLE IF NOT EXISTS notifications (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    uid        INTEGER NOT NULL,
+    time_stamp REAL    NOT NULL,
+    info       TEXT    NOT NULL
+)
+""")
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notifications_uid_ts "
+            "ON notifications (uid, time_stamp)"
+        )
+
+    def _migrate_legacy_tables(self):
+        """将 U{uid} 格式的每用户表迁移到统一表"""
+        rows = self.query(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name GLOB 'U[0-9]*'"
+        )
+        if not rows:
+            return
+
+        migrated = 0
+        for (table_name,) in rows:
+            uid_str = table_name[1:]
+            try:
+                uid = int(uid_str)
+            except ValueError:
+                continue
+
+            old_rows = self.query("SELECT time_stamp, info FROM {}".format(table_name))
+
+            if old_rows:
+                existing_ts = {
+                    ts for (ts,) in self.query(
+                        "SELECT time_stamp FROM notifications WHERE uid = ?", (uid,)
+                    )
+                }
+                to_insert = [
+                    (uid, ts, info)
+                    for ts, info in old_rows
+                    if ts not in existing_ts
+                ]
+                if to_insert:
+                    self.update(
+                        "INSERT INTO notifications (uid, time_stamp, info) VALUES (?, ?, ?)",
+                        to_insert,
+                    )
+
+            self.execute("DROP TABLE IF EXISTS {}".format(table_name))
+            migrated += 1
+
+        if migrated:
+            print("[INFO] DATABASE 自动迁移了 {} 个旧版每用户表到统一表".format(migrated))
 
     def _serialize_event(self, event):
         if isinstance(event, (dict, list)):
             return json.dumps(event, ensure_ascii=False)
         return str(event)
 
-    def _deserialize_event(self, raw_event : str):
+    def _deserialize_event(self, raw_event: str):
         try:
             event = json.loads(raw_event)
             if isinstance(event, dict):
                 return event
-            return {"content" : event}
+            return {"content": event}
         except json.JSONDecodeError:
-            return {"content" : raw_event}
+            return {"content": raw_event}
 
-    def query_events_after(self, uid : int, time_stamp : str):
+    def create_user_table(self, uid: int):
+        """deprecated，但是现留着"""
+        pass
+
+    def delete_user_table(self, uid: int):
+        """删除用户的所有通知"""
         uid = int(uid)
-        self.create_user_table(uid)
-        return self.query("SELECT * FROM U{} WHERE time_stamp > ? ORDER BY time_stamp ASC".format(uid), (time_stamp,))
+        self.execute("DELETE FROM notifications WHERE uid = ?", (uid,))
+    def add_event(self, uid: int, event) -> float:
+        uid = int(uid)
+        ts = time.time()
+        self.execute(
+            "INSERT INTO notifications (uid, time_stamp, info) VALUES (?, ?, ?)",
+            (uid, ts, self._serialize_event(event)),
+        )
+        return ts
 
-    def query_all_events(self, uid : int):
+    def query_events_after(self, uid: int, time_stamp):
+        uid = int(uid)
+        return self.query(
+            "SELECT time_stamp, info FROM notifications "
+            "WHERE uid = ? AND time_stamp > ? "
+            "ORDER BY time_stamp ASC",
+            (uid, time_stamp),
+        )
+
+    def query_all_events(self, uid: int):
         return self.query_events_after(uid, 0)
 
-    def list_events_after(self, uid : int, time_stamp : str):
+    def list_events_after(self, uid: int, time_stamp):
         events = []
-        for item_time_stamp, raw_event in self.query_events_after(uid, time_stamp):
+        for item_ts, raw_event in self.query_events_after(uid, time_stamp):
             event = self._deserialize_event(raw_event)
-            event["time_stamp"] = item_time_stamp
+            event["time_stamp"] = item_ts
             events.append(event)
         return events
 
-    def list_all_events(self, uid : int):
+    def list_all_events(self, uid: int):
         return self.list_events_after(uid, 0)
 
     def serialize_rows(self, rows):
         serialized = []
-        for time_stamp, raw_event in rows:
+        for ts, raw_event in rows:
             event = self._deserialize_event(raw_event)
-            serialized.append({"time_stamp" : time_stamp, "info" : event})
+            serialized.append({"time_stamp": ts, "info": event})
         return serialized
 
-    def add_event(self, uid : int, event : str):
+    def delete_events_before(self, uid: int, time_stamp) -> bool:
         uid = int(uid)
-        self.create_user_table(uid)
-        event_time_stamp = time.time()
         self.execute(
-            "INSERT INTO U{} (time_stamp, info) VALUES (?, ?)".format(uid),
-            (event_time_stamp, self._serialize_event(event))
+            "DELETE FROM notifications WHERE uid = ? AND time_stamp <= ?",
+            (uid, time_stamp),
         )
-        return event_time_stamp
-
-    def delete_events_before(self, uid : int, time_stamp : str):
-        uid = int(uid)
-        self.create_user_table(uid)
-        self.execute("DELETE FROM U{} WHERE time_stamp <= ?".format(uid), (time_stamp,))
         return True
 
-    def delete_all_events(self, uid : int):
+    def delete_all_events(self, uid: int) -> bool:
         uid = int(uid)
-        self.create_user_table(uid)
-        self.execute("DELETE FROM U{}".format(uid))
-        return True
-
-    def delete_user_table(self, uid : int):
-        uid = int(uid)
-        self.execute("DROP TABLE IF EXISTS U{}".format(uid))
+        self.execute("DELETE FROM notifications WHERE uid = ?", (uid,))
         return True

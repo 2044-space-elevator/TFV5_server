@@ -38,6 +38,17 @@ class RateLimiter:
         """返回适用的限制规则，优先端点规则，其次 default，无则 None。"""
         return self._limits.get(endpoint) or self._limits.get("default")
 
+    def reload(self, port_api: int) -> None:
+        """从配置文件加载 ratelimit"""
+        try:
+            with open("res/{}/config.json".format(port_api), "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            new_limits = cfg.get("rate_limits", {})
+        except Exception:
+            return
+        with self._lock:
+            self._limits = new_limits
+
     def is_allowed(self, ip: str, endpoint: str) -> bool:
         """
         判断来自 ip 的对 endpoint 的本次请求是否在速率限制内。
