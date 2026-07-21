@@ -2478,8 +2478,6 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 })
 
         result.sort(key=lambda x: x.get("last_time") or 0, reverse=True)
-        print("[INFO] chat_list uid={}: chat_rows={}, friend_uids={}, groups={}, result={}".format(
-            uid, len(chat_rows), len(friend_uids), len(group_rows), len(result)))
         return json.dumps(result, ensure_ascii=False)
 
     @api("/message/history", methods=['POST'])
