@@ -488,7 +488,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
         if not user_cursor.verify_user(uid, pwd):
             return bool_res()[False]
-        if not user_cursor.uid_query(uid)[0][4] == 'root':
+        user_row = get_user_row(uid)
+        if user_row is None or user_row[4] != 'root':
             return bool_res()[False]
         
         new_stat = req["change_to"]
@@ -592,7 +593,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     def activate(req):
         uid = req["uid"]
         activate_code = req["activate_code"]
-        email = user_cursor.uid_query(uid)[0][2]
+        uid_row = get_user_row(uid)
+        if uid_row is None:
+            return bool_res()[False]
+        email = uid_row[2]
         with locks['activate']:
             with open("res/{}/activate.json".format(port_api), "r+") as file:
                 if not email in json.load(file).keys():
@@ -813,7 +817,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         final_stat = req["change_to"]
         if not user_cursor.verify_user(uid, pwd):
             return bool_res()[False]
-        if not user_cursor.uid_query(uid)[0][4] == 'root':
+        user_row = get_user_row(uid)
+        if user_row is None or user_row[4] != 'root':
             return bool_res()[False]
         with locks['config']:
             with open("res/{}/config.json".format(port_api), "r+") as file:
@@ -845,7 +850,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         pwd = req["password"]
         if not user_cursor.verify_user(uid, pwd):
             return bool_res()[False]
-        if not user_cursor.uid_query(uid)[0][4] == 'root':
+        user_row = get_user_row(uid)
+        if user_row is None or user_row[4] != 'root':
             return bool_res()[False]
         new_limits = req.get("rate_limits")
         if new_limits is not None and not isinstance(new_limits, dict):
@@ -859,6 +865,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 cfg["rate_limits"] = new_limits
             with open("res/{}/config.json".format(port_api), "w+") as f:
                 json.dump(cfg, f)
+        limiter.reload(port_api)
         return bool_res()[True]
 
     @api("/auth/server_settings/query", methods=['POST'])
@@ -935,7 +942,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if not updates:
                 return bool_res()[False]
 
-            cfg = update_config(lambda current: current.update(updates))
+            def _apply(current):
+                current.update(updates)
+            cfg = update_config(_apply)
+            # 重新加载 ws
+            if "max_message_length" in updates:
+                instant_contact._load_config()
             return json.dumps(serialize_server_settings(cfg, include_manage=True), ensure_ascii=False)
         except Exception:
             return bool_res()[False]
@@ -992,7 +1004,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         introduction = req["introduction"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         with locks['queue']:
@@ -1018,7 +1033,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         password = req["password"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if not user_stat in ["admin", "root"]:
             return bool_res()[False]
         with locks['queue']:
@@ -1031,7 +1049,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         qid = req["qid"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if not user_stat in ["admin", "root"]:
             return bool_res()[False]
         with locks['queue']:
@@ -1076,7 +1097,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         reason = reason.strip()
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if not user_stat in ["admin", "root"]:
             return bool_res()[False]
         with locks['queue']:
@@ -1108,7 +1132,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         content = req["content"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         if not query_forum(fid):
@@ -1145,7 +1172,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not forum_info:
             return bool_res()[False]
         creater = forum_info[0][2]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if not (user_stat in ["admin", "root"] or uid == creater):
             return bool_res()[False]
         try:
@@ -1167,7 +1197,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not forum_info:
             return bool_res()[False]
         creater = forum_info[0][2]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if not (user_stat in ["admin", "root"] or uid == creater):
             return bool_res()[False]
         forum_name = req.get("forum_name", forum_info[0][1])
@@ -1205,7 +1238,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         creater = forum_info[0][2]
         creater_post = post_info[0][3] # 好像 3 是 creater
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if not (user_stat in ["admin", "root"] or uid == creater or uid == creater_post):
             return bool_res()[False]
         forum_cursor.delete_post(fid, pid)
@@ -1223,7 +1259,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not forum_info:
             return bool_res()[False]
         creater = forum_info[0][2]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if not (user_stat in ["admin", "root"] or uid == creater):
             return bool_res()[False]
         return bool_res()[forum_cursor.pin_post(fid, pid)]
@@ -1239,7 +1278,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not forum_info:
             return bool_res()[False]
         creater = forum_info[0][2]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if not (user_stat in ["admin", "root"] or uid == creater):
             return bool_res()[False]
         return bool_res()[forum_cursor.unpin_post(fid)]
@@ -1321,7 +1363,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         fid = req["fid"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         if not query_forum(fid):
@@ -1366,7 +1411,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         comment : str = req["comment"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         comment_time = str(time.time())
@@ -1381,7 +1429,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
 
         def send_comment_notifications():
-            sender_name = user_cursor.uid_query(uid)[0][1]
+            _sender_row = get_user_row(uid)
+            sender_name = _sender_row[1] if _sender_row else ''
             forum_info = forum_cursor.query_forum_fid(fid)
             post_info = forum_cursor.query_post_pid(fid, pid)
             notified_uids = set()
@@ -1425,7 +1474,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         fid = req["fid"]
         pid = req["pid"]
         time_stamp = req["send_time"]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
 
         def remove_comment_entry(comments):
             thread = get_comment_thread(comments, fid, pid)
@@ -1467,7 +1519,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         fid = req["fid"]
         pic_b64 = req["pic"]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         forum_info = query_forum(fid)
         if not forum_info:
             return bool_res()[False]
@@ -1536,7 +1591,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         pic_b64 = req["pic"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if not user_stat in ['admin', 'root']:
             return bool_res()[False]
         if not validate_avatar_upload(pic_b64, read_config()):
@@ -1551,7 +1609,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         file_b64 = req["file_b64"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         cfg = read_config()
@@ -1638,7 +1699,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         password = req["password"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat not in ['admin', 'root']:
             return bool_res()[False]
         target_uid = req.get("target_uid")
@@ -1672,7 +1736,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         hashes = req["hash"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat not in ['admin', 'root']:
             return bool_res()[False]
         file.force_delete_file(port_api, hashes, file_cursor)
@@ -1717,7 +1784,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         content = req["content"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if not user_stat in ['admin', 'root']:
             return bool_res()[False]
         time_stamp = announcements.upload_announcement(port_api, uid, content, locks['announcement'])
@@ -1732,7 +1802,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         content = req["content"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if not user_stat in ['admin', 'root']:
             return bool_res()[False]
         succeeded = announcements.edit_announcement(port_api, time_stamp, content, locks['announcement'])
@@ -1747,7 +1820,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         time_stamp = req["time_stamp"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if not user_stat in ['admin', 'root']:
             return bool_res()[False]
         succeeded = announcements.delete_announcement(port_api, time_stamp, locks['announcement'])
@@ -1775,7 +1851,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         require_review = bool(req.get("require_review", True))
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         cfg = read_config()
@@ -1808,7 +1887,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         password = req["password"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         gid = req["gid"]
@@ -1845,7 +1927,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         removed = req["removed"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         oper = group_cursor.is_admin(gid, uid)
@@ -1868,7 +1953,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         gid = req["gid"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         if not group_cursor.is_member(gid, uid):
@@ -1887,7 +1975,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         removed = req["removed"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         if not group_cursor.is_admin(gid, uid) == 2:
@@ -1907,7 +1998,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         gid = req["gid"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         if not group_cursor.is_admin(gid, uid) == 2:
@@ -1936,7 +2030,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         new_owner = req["new_owner"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         if not group_cursor.is_admin(gid, uid) == 2:
@@ -1956,7 +2053,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         gid = req["gid"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         if not group_cursor.is_admin(gid, uid):
@@ -1970,7 +2070,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         gid = req["gid"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         if not group_cursor.is_admin(gid, uid) == 2:
@@ -1998,7 +2101,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         gid = req["gid"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         if not group_cursor.is_member(gid, uid):
@@ -2030,7 +2136,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         gid = req["gid"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         settings = group_cursor.get_group_settings(gid)
@@ -2066,7 +2175,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         invited_uid = req["invited_uid"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         if not group_cursor.is_member(gid, uid):
@@ -2106,7 +2218,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         gid = req["gid"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         if not group_cursor.is_admin(gid, uid):
@@ -2135,7 +2250,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         approved = bool(req.get("approved", False))
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
         req_info = group_cursor.query(
@@ -2190,7 +2308,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
             if not user_cursor.verify_user(uid, password):
                 return bool_res()[False]
-            user_stat = user_cursor.uid_query(uid)[0][4]
+            user_row = get_user_row(uid)
+            if user_row is None:
+                return bool_res()[False]
+            user_stat = user_row[4]
             if user_stat == 'banned':
                 return bool_res()[False]
 
@@ -2263,7 +2384,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not user_cursor.verify_user(uid, password):
             print("[WARN] chat_list: verify_user failed for uid={}".format(uid))
             return json.dumps({"error": "auth_failed"}, ensure_ascii=False)
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
 
@@ -2376,7 +2500,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
-        user_stat = user_cursor.uid_query(uid)[0][4]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        user_stat = user_row[4]
         if user_stat == 'banned':
             return bool_res()[False]
 
