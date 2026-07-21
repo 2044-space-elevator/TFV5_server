@@ -1,4 +1,5 @@
 import websockets
+from websockets.exceptions import InvalidMessage
 import time
 from argon2 import PasswordHasher
 import db
@@ -8,7 +9,17 @@ import asyncio
 import base64
 import os
 import threading
+import logging
 from collections import defaultdict
+
+
+class _InvalidHandshakeFilter(logging.Filter):
+    def filter(self, record):
+        exception = record.exc_info[1] if record.exc_info else None
+        return not (
+            record.getMessage() == "opening handshake failed"
+            and isinstance(exception, InvalidMessage)
+        )
 
 
 def can_access_room(user_cursor, group_cursor, uid: int, room_id: str) -> bool:
@@ -435,6 +446,9 @@ class InstantConnect():
     async def main(self):
         print("[INFO] 已严肃启动 TCP 服务器")
         self.loop = asyncio.get_running_loop()
-        async with websockets.serve(self.handler, "0.0.0.0", self.port_tcp):
+        websocket_logger = logging.getLogger("touchfish.websocket")
+        websocket_logger.addFilter(_InvalidHandshakeFilter())
+        async with websockets.serve(
+            self.handler, "0.0.0.0", self.port_tcp, logger=websocket_logger
+        ):
             await asyncio.Future() 
-
