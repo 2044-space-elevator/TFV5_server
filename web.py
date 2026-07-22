@@ -11,6 +11,7 @@ from sqlite3 import OperationalError
 import announcements
 from crypto import generate_rsa_keys, return_app_route
 from rate_limiter import RateLimiter
+from mention_utils import resolve_mentioned_uids, should_alert
 import time
 import threading
 
@@ -992,6 +993,19 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         return bool_res()[notification_cursor.delete_all_events(uid)]
 
+    @api("/auth/mention_candidates", methods=['POST'])
+    def mention_candidates(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        rows = user_cursor.query(
+            "SELECT uid, username FROM users WHERE stat != 'banned' ORDER BY username"
+        )
+        return json.dumps([
+            {"uid": row[0], "username": row[1]} for row in rows if row[0] != uid
+        ], ensure_ascii=False)
+
     @app.route("/info")
     def info():
         return serialize_server_settings(read_config())
@@ -1025,6 +1039,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             } 
             with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
                 json.dump(queue, file)
+        notify_user(uid, "forum.review.submitted", "论坛已提交审核",
+                    "论坛 {} 已提交审核。".format(forum_name), sender=uid,
+                    meta={"qid": qid, "forum_name": forum_name})
+        reviewer_rows = user_cursor.query(
+            "SELECT uid FROM users WHERE stat IN ('admin', 'root')"
+        )
+        notify_users([row[0] for row in reviewer_rows if row[0] != uid],
+                     "forum.review.pending", "新的论坛审核",
+                     "论坛 {} 等待审核。".format(forum_name), sender=uid,
+                     meta={"qid": qid, "forum_name": forum_name})
         return bool_res()[True]
         
     @api("/forum/get_approving_forum_list", methods=['POST'])
@@ -1114,7 +1138,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
                 json.dump(queue, file)
         reason_suffix = "原因：{}".format(reason) if reason else ""
-        notify_user(fchosen["creater"], "forum.rejected", "论坛未通过审核", "你创建的论坛 {} 未通过审核。{}".format(fchosen["forumname"], reason_suffix), sender=uid, meta={"qid" : qid, "forum_name" : fchosen["forumname"], "reason" : reason})
+        action_text = "编辑" if fchosen.get("type", "create") == "edit" else "创建"
+        notify_user(fchosen["creater"], "forum.rejected", "论坛未通过审核", "你{}的论坛 {} 未通过审核。{}".format(action_text, fchosen["forumname"], reason_suffix), sender=uid, meta={"qid" : qid, "fid": fchosen.get("fid"), "forum_name" : fchosen["forumname"], "reason" : reason})
         return bool_res()[True]
 
     @app.route("/forum/get_forum_list")
@@ -1143,7 +1168,23 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         max_post = read_config().get("max_post_content_length", 20000)
         if max_post > 0 and len(str(content)) > max_post:
             return bool_res()[False]
-        return bool_res()[forum_cursor.send_post(fid, uid, title, content)]
+        pid = forum_cursor.send_post(fid, uid, title, content)
+        if pid is False:
+            return bool_res()[False]
+        forum_info = forum_cursor.query_forum_fid(fid)
+        forum_name = forum_info[0][1] if forum_info else str(fid)
+        mentioned_uids = resolve_mentioned_uids(
+            "{} {}".format(title, content), user_cursor, exclude_uid=uid
+        )
+        sender_name = user_row[1]
+        for mentioned_uid in mentioned_uids:
+            notify_user(
+                mentioned_uid, "forum.post.mentioned", "你在帖子中被提及",
+                "{} 在论坛 {} 的帖子《{}》中提到了你。".format(
+                    sender_name, forum_name, title
+                ), sender=uid, meta={"fid": fid, "pid": pid}
+            )
+        return bool_res()[True]
 
 
     @app.route("/forum/get_post_list/<fid>")
@@ -1222,6 +1263,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             }
             with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
                 json.dump(queue, file)
+        notify_user(uid, "forum.review.submitted", "论坛编辑已提交审核",
+                    "论坛 {} 的编辑已提交审核。".format(forum_name), sender=uid,
+                    meta={"qid": qid, "fid": fid, "forum_name": forum_name})
+        reviewer_rows = user_cursor.query(
+            "SELECT uid FROM users WHERE stat IN ('admin', 'root')"
+        )
+        notify_users([row[0] for row in reviewer_rows if row[0] != uid],
+                     "forum.review.pending", "新的论坛编辑审核",
+                     "论坛 {} 的编辑等待审核。".format(forum_name), sender=uid,
+                     meta={"qid": qid, "fid": fid, "forum_name": forum_name})
         return bool_res()[True]
 
     @api("/forum/remove_post", methods=['POST'])
@@ -1245,6 +1296,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not (user_stat in ["admin", "root"] or uid == creater or uid == creater_post):
             return bool_res()[False]
         forum_cursor.delete_post(fid, pid)
+        if uid != creater_post:
+            notify_user(
+                creater_post, "forum.post.deleted", "你的帖子已被删除",
+                "你的帖子《{}》已被其他用户删除。".format(post_info[0][2]),
+                sender=uid, meta={"fid": fid, "pid": pid}
+            )
         return bool_res()[True]
 
     @api("/forum/pin_post", methods=["POST"])
@@ -1435,13 +1492,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             post_info = forum_cursor.query_post_pid(fid, pid)
             notified_uids = set()
             forum_name = forum_info[0][1] if forum_info else str(fid)
-            post_title = post_info[0][1] if post_info else str(pid)
+            post_title = post_info[0][2] if post_info else str(pid)
             if post_info:
-                post_creater = post_info[0][2]
+                post_creater = post_info[0][3]
                 if post_creater != uid:
                     notify_user(post_creater, "forum.comment.created", "你的帖子收到新评论", "{} 评论了你的帖子《{}》。".format(sender_name, post_title), sender=uid, meta={"fid" : fid, "pid" : pid, "comment_time" : comment_time})
                     notified_uids.add(post_creater)
-            for mentioned_uid in extract_mentioned_uids(comment):
+            for mentioned_uid in resolve_mentioned_uids(
+                comment, user_cursor, exclude_uid=uid
+            ):
                 if mentioned_uid == uid or mentioned_uid in notified_uids:
                     continue
                 notify_user(mentioned_uid, "forum.comment.mentioned", "你在评论中被提及", "{} 在论坛 {} 的评论中提到了你。".format(sender_name, forum_name), sender=uid, meta={"fid" : fid, "pid" : pid, "comment_time" : comment_time})
@@ -1479,6 +1538,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         user_stat = user_row[4]
 
+        removed_creator = [None]
         def remove_comment_entry(comments):
             thread = get_comment_thread(comments, fid, pid)
             if thread is None or time_stamp not in thread:
@@ -1486,11 +1546,18 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             creater = thread[time_stamp][0]
             if not (creater == uid or user_stat in ['admin', 'root']):
                 return False
+            removed_creator[0] = creater
             del thread[time_stamp]
             return True
 
         if not update_comments(port_api, remove_comment_entry):
             return bool_res()[False]
+        if removed_creator[0] is not None and removed_creator[0] != uid:
+            notify_user(
+                removed_creator[0], "forum.comment.deleted", "你的评论已被删除",
+                "你在帖子中的评论已被其他用户删除。", sender=uid,
+                meta={"fid": fid, "pid": pid, "comment_time": time_stamp}
+            )
         return bool_res()[True]
 
     @app.route("/avatar/get_avatar/<typ>/<tid>")
@@ -2160,8 +2227,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 if limit != -1 and len(members) >= limit:
                     return bool_res()[False]
                 rid = group_cursor.request_join(gid, uid)
+                reviewers = [settings["creater"]] + group_cursor.get_admin_uids(gid)
                 run_notification_side_effect("group.join.request",
-                    lambda: notify_user(settings["creater"], "group.join.request",
+                    lambda: notify_users(reviewers, "group.join.request",
                         "新的入群申请", "用户 {} 申请加入群 {}。".format(uid, settings["groupname"]),
                         sender=uid, meta={"gid": gid, "rid": rid}))
                 return json.dumps({"rid": rid, "pending": True})
@@ -2201,8 +2269,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 return json.dumps({"pending": False})
             return bool_res()[False]
         rid = group_cursor.request_join(gid, invited_uid, inviter_uid=uid)
+        reviewers = [settings["creater"]] + group_cursor.get_admin_uids(gid)
         run_notification_side_effect("group.join.request",
-            lambda: notify_user(settings["creater"], "group.join.request",
+            lambda: notify_users(reviewers, "group.join.request",
                 "新的入群申请", "用户 {} 邀请 {} 加入群 {}，等待审核。".format(uid, invited_uid, settings["groupname"]),
                 sender=uid, meta={"gid": gid, "rid": rid}))
         run_notification_side_effect("group.invited.pending",
@@ -2304,7 +2373,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             content_type = str(req.get("content_type", "plain"))
             client_mid = req.get("client_mid")
             quote = int(req.get("quote", -1))
-            file_hash = req.get("file_hash") if content_type == "file" else None
+            if content_type not in ("plain", "file"):
+                return bool_res()[False]
+            file_hash = None
+            if content_type == "file":
+                file_hash = str(req.get("file_hash") or content)
+                if (len(file_hash) != 64
+                        or not all(char in "0123456789abcdefABCDEF" for char in file_hash)):
+                    return bool_res()[False]
+                content = file_hash
 
             if not user_cursor.verify_user(uid, password):
                 return bool_res()[False]
@@ -2346,6 +2423,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if msg_record.get("duplicate"):
                 return json.dumps({"mid": msg_record["mid"], "client_mid": client_mid, "status": "sent"})
 
+            if content_type == "plain":
+                allowed_mentions = group_cursor.get_member_uids(group_id) if group_id else [target_uid]
+                mentioned_uids = resolve_mentioned_uids(
+                    content, user_cursor, allowed_mentions, exclude_uid=uid
+                )
+            else:
+                mentioned_uids = []
+            messages_cursor.set_message_mentions(msg_record["mid"], mentioned_uids)
+
             notif = build_notification(
                 "message.{}".format(content_type),
                 str(msg_record["send_time"]),
@@ -2355,6 +2441,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             )
             notif["mid"] = msg_record["mid"]
             notif["client_mid"] = client_mid
+            notif["mentioned_uids"] = mentioned_uids
             if group_id:
                 notif["group_id"] = group_id
                 notif["room_id"] = "G{}".format(group_id)
@@ -2362,13 +2449,25 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 notif["file_hash"] = file_hash
 
             if group_id:
+                room_id = "G{}".format(group_id)
                 for user in group_cursor.get_member_uids(group_id):
-                    instant_contact.notify_user(user, notif)
+                    user_notif = dict(notif)
+                    user_notif["mentions_me"] = user in mentioned_uids
+                    user_notif["should_alert"] = user != uid and should_alert(
+                        messages_cursor, user, room_id, mentioned_uids
+                    )
+                    instant_contact.notify_user(user, user_notif)
             else:
                 recv_notif = dict(notif)
                 recv_notif["room_id"] = "U{}".format(uid)
+                recv_notif["mentions_me"] = target_uid in mentioned_uids
+                recv_notif["should_alert"] = should_alert(
+                    messages_cursor, target_uid, recv_notif["room_id"], mentioned_uids
+                )
                 sender_notif = dict(notif)
                 sender_notif["room_id"] = "U{}".format(target_uid)
+                sender_notif["mentions_me"] = False
+                sender_notif["should_alert"] = False
                 instant_contact.notify_user(target_uid, recv_notif)
                 instant_contact.notify_user(uid, sender_notif)
 
@@ -2445,12 +2544,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             )
             username_map = {r[0]: r[1] for r in uname_rows}
 
+        preferences = messages_cursor.get_room_preferences(uid)
         result = []
         for key, chat in partner_map.items():
             if key < 0:
                 gid = chat["group_id"]
+                room_id = "G{}".format(gid)
+                pref = preferences.get(room_id)
                 result.append({
-                    "room_id": "G{}".format(gid),
+                    "room_id": room_id,
                     "room_type": "group",
                     "partner_uid": gid,
                     "username": chat.get("groupname", "Group {}".format(gid)),
@@ -2461,10 +2563,14 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                     "last_sender_uid": chat.get("last_sender_uid"),
                     "last_mid": chat.get("last_mid"),
                     "is_friend": False,
+                    "is_pinned": pref.get("is_pinned") if pref else None,
+                    "notify_level": pref.get("notify_level") if pref else None,
                 })
             else:
+                room_id = "U{}".format(key)
+                pref = preferences.get(room_id)
                 result.append({
-                    "room_id": "U{}".format(key),
+                    "room_id": room_id,
                     "room_type": "direct",
                     "partner_uid": key,
                     "username": username_map.get(key, "User {}".format(key)),
@@ -2475,10 +2581,46 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                     "last_sender_uid": chat.get("last_sender_uid"),
                     "last_mid": chat.get("last_mid"),
                     "is_friend": key in friend_uids,
+                    "is_pinned": pref.get("is_pinned") if pref else None,
+                    "notify_level": pref.get("notify_level") if pref else None,
                 })
 
         result.sort(key=lambda x: x.get("last_time") or 0, reverse=True)
         return json.dumps(result, ensure_ascii=False)
+
+    @api("/chat/preferences/update", methods=['POST'])
+    def update_chat_preference(req):
+        uid = req["uid"]
+        password = req["password"]
+        room_id = str(req.get("room_id", ""))
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        if len(room_id) < 2:
+            return bool_res()[False]
+        try:
+            target_id = int(room_id[1:])
+        except (TypeError, ValueError):
+            return bool_res()[False]
+        if room_id.startswith("U"):
+            allowed = user_cursor.is_friend(uid, target_id)
+        elif room_id.startswith("G"):
+            allowed = group_cursor.is_member(target_id, uid)
+        else:
+            allowed = False
+        if not allowed:
+            return bool_res()[False]
+        is_pinned = req.get("is_pinned") if "is_pinned" in req else None
+        notify_level = req.get("notify_level") if "notify_level" in req else None
+        if is_pinned is not None and not isinstance(is_pinned, bool):
+            return bool_res()[False]
+        if notify_level is not None:
+            try:
+                notify_level = int(notify_level)
+            except (TypeError, ValueError):
+                return bool_res()[False]
+        return bool_res()[messages_cursor.update_room_preference(
+            uid, room_id, is_pinned=is_pinned, notify_level=notify_level
+        )]
 
     @api("/message/history", methods=['POST'])
     def message_history(req):
@@ -2490,7 +2632,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             target_uid = int(req.get("target_uid", 0)) if has_target else 0
             group_id = req.get("group_id")
             before_mid = int(req.get("before_mid", 0))
-            limit = min(int(req.get("limit", 50)), 200)
+            limit = max(1, min(int(req.get("limit", 50)), 200))
             if group_id is not None:
                 group_id = int(group_id)
         except (ValueError, TypeError):

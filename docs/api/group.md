@@ -185,7 +185,7 @@ TFV5 群聊系统支持创建群组、成员管理、管理员管理、入群审
 
 返回：
 - 若无需审核（`require_review = false`），直接加入成功返回 `{"pending": false}`。
-- 若需审核，创建入群申请，返回 `{"rid": <rid>, "pending": true}`。群主会收到 `group.join.request` 通知。
+- 若需审核，创建入群申请，返回 `{"rid": <rid>, "pending": true}`。群主和所有管理员会收到 `group.join.request` 通知。
 - 失败返回时间戳加 `False`。
 
 ---
@@ -207,7 +207,7 @@ TFV5 群聊系统支持创建群组、成员管理、管理员管理、入群审
 
 返回：
 - 若群无需审核（`require_review = false`）或邀请者是管理员/群主，被邀请者直接加入，返回 `{"pending": false}`。被邀请者收到 `group.invited` 通知。
-- 否则创建入群申请，返回 `{"rid": <rid>, "pending": true}`。被邀请者也会收到 `group.invited` 通知。
+- 否则创建入群申请，返回 `{"rid": <rid>, "pending": true}`。群主和所有管理员会收到 `group.join.request` 通知，被邀请者也会收到 `group.invited.pending` 通知。
 
 ---
 
@@ -372,7 +372,8 @@ TFV5 群聊系统支持创建群组、成员管理、管理员管理、入群审
 - `group.owner.transferred` — 被转让为群主
 - `group.join.request` — 收到新的入群申请（发送给群主）
 - `group.join.approved` — 入群申请被通过（发送给申请人）
-- `group.invited` — 被邀请加入群聊
+- `group.invited` — 被邀请加入群聊（无需审核直接加入时）
+- `group.invited.pending` — 被邀请加入群聊，等待审核
 
 ---
 

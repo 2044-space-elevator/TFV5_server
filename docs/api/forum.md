@@ -13,7 +13,23 @@
 }
 ```
 
-需注意，创建论坛后不是马上出现在论坛页面，是进入审核页面，等待管理员审核。
+需注意，创建论坛后不是马上出现在论坛页面，是进入审核页面，等待管理员审核。创建成功后，创建者会收到 `forum.review.submitted` 通知，所有管理员会收到 `forum.review.pending` 通知。
+
+- `^ POST /forum/edit_forum` 编辑论坛信息。
+
+**只有论坛创建者有权限操作。** 编辑后需重新进入审核队列，等待管理员审核。
+
+请求体：
+
+```
+{
+    "fid" : <fid>,
+    "forum_name" : <forum_name>,
+    "introduction" : <introduction>
+}
+```
+
+编辑提交后，操作者会收到 `forum.review.submitted` 通知，所有管理员会收到 `forum.review.pending` 通知。
 
 - `^ POST /forum/get_approving_forum_list` 获取所有在审核队列
 
@@ -72,7 +88,7 @@
 }
 ```
 
-其中 `<qid>` 是队列中的请求 id，`<reason>` 是可选的拒绝原因。
+其中 `<qid>` 是队列中的请求 id，`<reason>` 是可选的拒绝原因。拒绝通知中会区分是"创建"还是"编辑"的申请。
 
 - `* GET /forum/get_forum_list` 获取所有论坛
 
@@ -106,6 +122,8 @@
 }
 ```
 
+如果帖子标题和正文中包含 `@用户名`，被提及的用户会收到 `forum.post.mentioned` 通知。
+
 - `* GET /forum/get_post_list/<fid>` 获取某一论坛的所有帖子
 
 返回体：
@@ -134,6 +152,8 @@
     "pid" : <pid>
 }
 ```
+
+如果操作者不是帖子发布者（即由论坛创始人或管理员删除），帖子发布者会收到 `forum.post.deleted` 通知。
 
 
 - `^ POST /forum/remove_forum` 删除论坛
@@ -181,4 +201,20 @@
 ```
 
 其中 `<send_time>` 是评论的时间戳。
+
+如果操作者不是评论发布者（即由他人删除），评论发布者会收到 `forum.comment.deleted` 通知。
+
+## 论坛通知事件类型
+
+论坛相关的事件通知（参见[通知文档](notification.md)）：
+
+- `forum.approved` — 论坛创建/编辑通过审核
+- `forum.rejected` — 论坛创建/编辑被拒绝
+- `forum.review.submitted` — 论坛创建/编辑已提交审核（发送给操作者）
+- `forum.review.pending` — 新的论坛审核等待处理（发送给管理员）
+- `forum.comment.created` — 帖子收到新评论
+- `forum.comment.mentioned` — 在评论中被 @提及
+- `forum.post.mentioned` — 在帖子中被 @提及
+- `forum.post.deleted` — 帖子被他人删除
+- `forum.comment.deleted` — 评论被他人删除
 

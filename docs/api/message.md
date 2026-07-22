@@ -27,7 +27,8 @@ TFV5 的消息系统由两部分组成：
     "file_hash" : <file_hash>,
     "send_time" : <send_time>,
     "quote" : <quote_mid>,
-    "deleted" : 0 | 1
+    "deleted" : 0 | 1,
+    "mentioned_uids" : [<uid>, ...]
 }
 ```
 
@@ -36,6 +37,7 @@ TFV5 的消息系统由两部分组成：
 - `<content_type>`：`"plain"` 表示文本消息，`"file"` 表示文件消息。
 - `<file_hash>`：文件消息的取件码（参见[文件文档](file.md)）。
 - `<quote>`：引用的消息 `mid`，`-1` 表示不引用。
+- `<mentioned_uids>`：消息正文中通过 `@用户名` 提及的用户 uid 列表。仅在 `content_type` 为 `"plain"` 时有值。
 - `<room_id>`：聊天室标识，格式为 `"U<uid>"` 或 `"G<gid>"`。
 
 ### 聊天室对象
@@ -52,9 +54,69 @@ TFV5 的消息系统由两部分组成：
     "last_time" : <last_time>,
     "last_sender_uid" : <last_sender_uid>,
     "last_mid" : <last_mid>,
-    "is_friend" : <true_or_false>
+    "is_friend" : <true_or_false>,
+    "is_pinned" : <true_or_false>,
+    "notify_level" : <0_or_1_or_2>
 }
 ```
+
+- `is_friend`：`room_type = "direct"` 时表示当前是否仍为好友关系。
+- `is_pinned`：当前用户是否将此聊天室置顶。
+- `notify_level`：当前用户对此聊天室的通知级别。`0` = 全部通知，`1` = 仅 @提及，`2` = 静音。首次访问或未设置时返回 `null`。
+
+---
+
+### @提及候选用户
+
+- `^ POST /auth/mention_candidates` 获取当前服务器上可以被 @提及的用户列表。
+
+请求体：
+
+```json
+{
+
+}
+```
+
+返回体：
+
+```json
+[
+    {
+        "uid" : <uid>,
+        "username" : <username>
+    }
+]
+```
+
+过滤掉当前用户及被封禁用户。结果按 `username` 升序排列。
+
+---
+
+### 聊天室偏好设置
+
+- `^ POST /chat/preferences/update` 更新当前用户对指定聊天室的偏好（置顶、通知级别）。
+
+请求体：
+
+```json
+{
+    "room_id" : <room_id>,
+    "is_pinned" : <true_or_false>,
+    "notify_level" : <0_or_1_or_2>
+}
+```
+
+其中：
+- `<room_id>`（必填）聊天室标识，格式为 `"U<uid>"`（私聊）或 `"G<gid>"`（群聊）。
+- `<is_pinned>`（可选，布尔类型）是否置顶该聊天室。
+- `<notify_level>`（可选，整数类型）通知级别：`0` = 全部通知，`1` = 仅 @提及，`2` = 静音。
+
+以上字段至少传入一个，只更新传入的字段。
+
+权限约束：操作者必须与目标私聊用户为好友关系，或为目标群的成员。
+
+返回：成功返回时间戳加 `True`，否则返回时间戳加 `False`。
 
 ---
 
@@ -89,7 +151,9 @@ TFV5 的消息系统由两部分组成：
 
 校验：
 - 操作者必须与接收方为好友关系（私聊），或为该群成员（群聊）。
+- `content_type` 仅允许为 `"plain"` 或 `"file"`，否则请求将被拒绝。
 - 文本消息长度不得超过 `max_message_length` 配置（默认 10000 字符）。
+- 当 `content_type = "file"` 时，`file_hash` 必须为 64 位十六进制字符串（SHA-256 格式），否则请求将被拒绝。
 
 返回：成功返回 `{"mid": <mid>, "client_mid": <client_mid>, "status": "sent"}`。重复提交也返回此格式（`mid` 为已有消息ID）。失败返回时间戳加 `False`。
 
@@ -170,7 +234,8 @@ TFV5 的消息系统由两部分组成：
         "file_hash" : <file_hash>,
         "send_time" : <send_time>,
         "quote" : <quote_mid>,
-        "deleted" : 0 | 1
+        "deleted" : 0 | 1,
+        "mentioned_uids" : [<uid>, ...]
     }
 ]
 ```
@@ -313,7 +378,10 @@ TFV5 的消息系统由两部分组成：
     "mid" : <mid>,
     "client_mid" : <client_mid>,
     "room_id" : "<room_id>",
-    "group_id" : <group_id>
+    "group_id" : <group_id>,
+    "mentioned_uids" : [<uid>, ...],
+    "mentions_me" : <true_or_false>,
+    "should_alert" : <true_or_false>
 }
 ```
 
@@ -330,7 +398,10 @@ TFV5 的消息系统由两部分组成：
     "file_hash" : <file_hashes>,
     "client_mid" : <client_mid>,
     "room_id" : "<room_id>",
-    "group_id" : <group_id>
+    "group_id" : <group_id>,
+    "mentioned_uids" : [],
+    "mentions_me" : false,
+    "should_alert" : <true_or_false>
 }
 ```
 
@@ -341,6 +412,9 @@ TFV5 的消息系统由两部分组成：
 - `<group_id>`：群聊时存在，为群 gid。私聊时无此字段。
 - `<sender_id>`：私聊为 `"U<uid>"`，群聊为 `"G<gid>U<uid>"`。
 - `<meta>`：引用的消息 `mid`。
+- `<mentioned_uids>`：消息中被 @提及的用户 uid 列表。文件消息固定为空数组。
+- `<mentions_me>`：当前接收用户是否在被提及列表中。发送方收到的推送中固定为 `false`。
+- `<should_alert>`：客户端是否应触发通知提醒。由用户的聊天室偏好（`notify_level`）和被提及状态共同决定。发送方收到的推送中固定为 `false`。
 
 ### 输入状态
 

@@ -11,6 +11,7 @@ import os
 import threading
 import logging
 from collections import defaultdict
+from mention_utils import resolve_mentioned_uids, should_alert
 
 
 class _InvalidHandshakeFilter(logging.Filter):
@@ -268,6 +269,12 @@ class InstantConnect():
                         self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
                         if msg_record.get("duplicate"):
                             continue
+                        mentioned_uids = resolve_mentioned_uids(
+                            plain, self.user_cursor, [send_to], exclude_uid=sender_uid
+                        )
+                        self.messages_cursor.set_message_mentions(
+                            msg_record["mid"], mentioned_uids
+                        )
                         sender_str = "U{}".format(sender_uid)
                         recv_notif = {
                             "event" : "message.plain",
@@ -279,8 +286,15 @@ class InstantConnect():
                             "client_mid" : client_mid,
                             "room_id" : sender_str
                         }
+                        recv_notif["mentioned_uids"] = mentioned_uids
+                        recv_notif["mentions_me"] = send_to in mentioned_uids
+                        recv_notif["should_alert"] = should_alert(
+                            self.messages_cursor, send_to, sender_str, mentioned_uids
+                        )
                         sender_notif = dict(recv_notif)
                         sender_notif["room_id"] = "U{}".format(send_to)
+                        sender_notif["mentions_me"] = False
+                        sender_notif["should_alert"] = False
                         await self._notify_user_async(send_to, recv_notif)
                         await self._notify_user_async(sender_uid, sender_notif)
 
@@ -303,6 +317,15 @@ class InstantConnect():
                         self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
                         if msg_record.get("duplicate"):
                             continue
+                        mentioned_uids = resolve_mentioned_uids(
+                            plain,
+                            self.user_cursor,
+                            members,
+                            exclude_uid=self.clients_belonged[websocket],
+                        )
+                        self.messages_cursor.set_message_mentions(
+                            msg_record["mid"], mentioned_uids
+                        )
                         notif_dict = {
                             "event" : "message.plain",
                             "title" : str(msg_record["send_time"]),
@@ -315,7 +338,19 @@ class InstantConnect():
                             "group_id" : gid
                         }
                         for user in members:
-                            await self._notify_user_async(user, notif_dict)
+                            user_notif = dict(notif_dict)
+                            user_notif["mentioned_uids"] = mentioned_uids
+                            user_notif["mentions_me"] = user in mentioned_uids
+                            user_notif["should_alert"] = (
+                                user != self.clients_belonged[websocket]
+                                and should_alert(
+                                    self.messages_cursor,
+                                    user,
+                                    "G{}".format(gid),
+                                    mentioned_uids,
+                                )
+                            )
+                            await self._notify_user_async(user, user_notif)
 
                     else:
                         self._queue_ack(websocket, client_mid, status="failed", error="invalid_target")
@@ -363,8 +398,14 @@ class InstantConnect():
                             "client_mid" : client_mid,
                             "room_id" : sender_str
                         }
+                        recv_notif["mentioned_uids"] = []
+                        recv_notif["mentions_me"] = False
+                        recv_notif["should_alert"] = should_alert(
+                            self.messages_cursor, send_to, sender_str, []
+                        )
                         sender_notif = dict(recv_notif)
                         sender_notif["room_id"] = "U{}".format(send_to)
+                        sender_notif["should_alert"] = False
                         await self._notify_user_async(send_to, recv_notif)
                         await self._notify_user_async(sender_uid, sender_notif)
 
@@ -400,7 +441,16 @@ class InstantConnect():
                             "group_id" : gid
                         }
                         for user in members:
-                            await self._notify_user_async(user, notif_dict)
+                            user_notif = dict(notif_dict)
+                            user_notif["mentioned_uids"] = []
+                            user_notif["mentions_me"] = False
+                            user_notif["should_alert"] = (
+                                user != self.clients_belonged[websocket]
+                                and should_alert(
+                                    self.messages_cursor, user, "G{}".format(gid), []
+                                )
+                            )
+                            await self._notify_user_async(user, user_notif)
 
                     else:
                         self._queue_ack(websocket, client_mid, status="failed", error="invalid_target")
