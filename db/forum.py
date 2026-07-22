@@ -171,7 +171,7 @@ class ForumDb(Db):
             update_comments(self.api_pt, add_post_bucket)
         except Exception as e:
             print("[WARN] send_post: comments JSON 更新失败 fid={} pid={}: {}".format(fid, pid, e))
-        return True
+        return pid
     
     def pin_post(self, fid : int, pid : int):
         if not self.query_post_pid(fid, pid):

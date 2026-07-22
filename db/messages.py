@@ -25,6 +25,23 @@ class MessagesDb(Db):
                 deleted INTEGER NOT NULL DEFAULT 0
             )
         """)
+        self.execute("""
+            CREATE TABLE IF NOT EXISTS room_preferences (
+                uid INTEGER NOT NULL,
+                room_id TEXT NOT NULL,
+                is_pinned INTEGER NOT NULL DEFAULT 0,
+                notify_level INTEGER NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (uid, room_id)
+            )
+        """)
+        self.execute("""
+            CREATE TABLE IF NOT EXISTS message_mentions (
+                mid INTEGER NOT NULL,
+                uid INTEGER NOT NULL,
+                PRIMARY KEY (mid, uid)
+            )
+        """)
 
     def _migrate(self):
         """尝试修复db"""
@@ -134,7 +151,21 @@ class MessagesDb(Db):
                 "content", "content_type", "file_hash", "send_time", "quote", "deleted"]
 
     def serialize_rows(self, rows) -> list:
-        return [dict(zip(self._COLUMNS, r)) for r in rows]
+        records = [dict(zip(self._COLUMNS, r)) for r in rows]
+        if not records:
+            return records
+        mids = [record["mid"] for record in records]
+        placeholders = ",".join("?" * len(mids))
+        mention_rows = self.query(
+            "SELECT mid, uid FROM message_mentions WHERE mid IN ({})".format(placeholders),
+            tuple(mids),
+        )
+        mentions = {}
+        for mid, uid in mention_rows:
+            mentions.setdefault(mid, []).append(uid)
+        for record in records:
+            record["mentioned_uids"] = mentions.get(record["mid"], [])
+        return records
 
     def get_chat_list(self, uid: int) -> list:
         """返回与每个用户的最新单聊消息。
@@ -153,10 +184,11 @@ class MessagesDb(Db):
                  FROM messages
                  WHERE deleted = 0 AND group_id IS NULL
                    AND (sender_uid = ? OR receiver_uid = ?)
+                   AND sender_uid != receiver_uid
                )
-               WHERE rn = 1
+               WHERE rn = 1 AND partner_uid != ?
                ORDER BY mid DESC""",
-            (uid, uid, uid, uid)
+            (uid, uid, uid, uid, uid)
         )
         return [
             {
@@ -235,3 +267,55 @@ class MessagesDb(Db):
     def delete_message(self, mid: int) -> bool:
         self.execute("UPDATE messages SET deleted = 1 WHERE mid = ?", (mid,))
         return True
+
+    def get_room_preferences(self, uid: int) -> dict:
+        rows = self.query(
+            "SELECT room_id, is_pinned, notify_level FROM room_preferences WHERE uid = ?",
+            (uid,),
+        )
+        return {
+            row[0]: {"is_pinned": bool(row[1]), "notify_level": int(row[2])}
+            for row in rows
+        }
+
+    def get_room_preference(self, uid: int, room_id: str) -> dict:
+        rows = self.query(
+            "SELECT is_pinned, notify_level FROM room_preferences WHERE uid = ? AND room_id = ?",
+            (uid, room_id),
+        )
+        if not rows:
+            return {"is_pinned": False, "notify_level": 0}
+        return {"is_pinned": bool(rows[0][0]), "notify_level": int(rows[0][1])}
+
+    def update_room_preference(self, uid: int, room_id: str,
+                               is_pinned=None, notify_level=None) -> bool:
+        current = self.query(
+            "SELECT is_pinned, notify_level FROM room_preferences WHERE uid = ? AND room_id = ?",
+            (uid, room_id),
+        )
+        pinned = int(bool(is_pinned)) if is_pinned is not None else (
+            int(current[0][0]) if current else 0
+        )
+        level = int(notify_level) if notify_level is not None else (
+            int(current[0][1]) if current else 0
+        )
+        if level not in (0, 1, 2):
+            return False
+        self.execute(
+            """INSERT INTO room_preferences(uid, room_id, is_pinned, notify_level, updated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(uid, room_id) DO UPDATE SET
+                 is_pinned = excluded.is_pinned,
+                 notify_level = excluded.notify_level,
+                 updated_at = excluded.updated_at""",
+            (uid, room_id, pinned, level, time.time()),
+        )
+        return True
+
+    def set_message_mentions(self, mid: int, mentioned_uids) -> None:
+        values = [(mid, int(uid)) for uid in set(mentioned_uids)]
+        if values:
+            self.update(
+                "INSERT OR IGNORE INTO message_mentions(mid, uid) VALUES (?, ?)",
+                values,
+            )

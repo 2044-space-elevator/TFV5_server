@@ -42,8 +42,13 @@ TFV5 的通知系统由两部分组成：
 - `auth.stat.changed`
 - `forum.approved`
 - `forum.rejected`
+- `forum.review.submitted`
+- `forum.review.pending`
 - `forum.comment.created`
 - `forum.comment.mentioned`
+- `forum.post.mentioned`
+- `forum.post.deleted`
+- `forum.comment.deleted`
 - `announcement.created`
 - `announcement.edited`
 - `group.admin.added`
@@ -53,6 +58,7 @@ TFV5 的通知系统由两部分组成：
 - `group.owner.transferred`
 - `group.join.request`
 - `group.invited`
+- `group.invited.pending`
 - `group.join.approved`
 - `message.plain`
 - `message.file`
@@ -199,7 +205,10 @@ ws://<server_host>:<port_tcp>
     “meta” : <quote_mid>,
     “mid” : <mid>,
     “client_mid” : <client_mid>,
-    “room_id” : “<room_id>”
+    “room_id” : “<room_id>”,
+    “mentioned_uids” : [<uid>, ...],
+    “mentions_me” : <true_or_false>,
+    “should_alert” : <true_or_false>
 }
 ```
 
@@ -207,6 +216,9 @@ ws://<server_host>:<port_tcp>
 - `<mid>`：服务端分配的消息唯一 ID。
 - `<client_mid>`：客户端发送时携带的去重标识（若发送时未携带则为 `null`）。
 - `<room_id>`：聊天室标识。私聊时，接收方看到的 `room_id` 为发送者 uid（`”U<sender_uid>”`），发送方（自己也会收到推送）看到的为 `”U<target_uid>”`。群聊时为 `”G<gid>”`。
+- `<mentioned_uids>`：消息中被 @提及的用户 uid 列表。发送方收到的推送中固定为空。
+- `<mentions_me>`：当前接收用户是否在被提及列表中。发送方收到的推送中固定为 `false`。
+- `<should_alert>`：客户端是否应触发通知提醒。由用户的聊天室偏好（`notify_level`）和被提及状态共同决定。发送方收到的推送中固定为 `false`。
 
 `<sender_id>` 的格式：
 - 私聊：`”U<uid>”`，如 `”U0”`。
@@ -227,11 +239,14 @@ ws://<server_host>:<port_tcp>
     “mid” : <mid>,
     “file_hash” : <hashes>,
     “client_mid” : <client_mid>,
-    “room_id” : “<room_id>”
+    “room_id” : “<room_id>”,
+    “mentioned_uids” : [],
+    “mentions_me” : false,
+    “should_alert” : <true_or_false>
 }
 ```
 
-格式说明同文本消息。`<hashes>` 是文件的取件码。
+格式说明同文本消息。`<hashes>` 是文件的取件码。文件消息不支持 @提及，`mentioned_uids` 固定为空数组，`mentions_me` 固定为 `false`。
 
 ### 客户端发送消息
 
