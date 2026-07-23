@@ -128,6 +128,8 @@ TFV5 的消息系统由两部分组成：
 
 - `^ POST /message/send` 发送文本或文件消息。
 
+*提示：在有 WebSocket 连接时，推荐优先使用 WebSocket 发送消息。*
+
 请求体：
 
 ```json
@@ -201,6 +203,8 @@ TFV5 的消息系统由两部分组成：
 
 - `^ POST /message/history` 拉取历史消息（分页）。
 
+*注意：不应频繁调用历史消息接口获取消息，在有 WebSocket 连接时，推荐优先使用实时推送。*
+
 请求体：
 
 ```json
@@ -254,7 +258,7 @@ TFV5 的消息系统由两部分组成：
 
 - 所有 WebSocket 消息（除心跳外）均经过 AES 加密，封装格式同 [secret 类型 API](main.md#对于-secret-类型)。
 - 每条消息可携带 `client_mid`（客户端生成的唯一标识），用于去重和发送确认。
-- 服务端对每个用户实施 **每秒 10 条**消息的限流。超出限制时返回 `message.ack` 带 `"rate_limited"` 错误。
+- 服务端对每个用户默认实施 **每秒 10 条**消息的限流。超出限制时返回 `message.ack` 带 `"rate_limited"` 错误。
 
 ---
 
