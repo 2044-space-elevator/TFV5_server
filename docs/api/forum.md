@@ -118,27 +118,68 @@
 {
     "fid" : <fid>,
     "title" : <title>,
-    "content" : <content>
+    "content" : <content>,
+    "attachment_hashes" : [<file_hash>, ...]
 }
 ```
+
+`attachment_hashes` 可选，也可使用兼容格式 `"attachments": [{"hash": <file_hash>}, ...]`。每个哈希必须：
+
+- 是 64 位十六进制 SHA-256 字符串；
+- 对应一个仍然存在的文件；
+- 属于发帖用户的有效文件记录；
+- 在同一个帖子中不重复。
+
+单个帖子最多可附加 `max_post_attachments` 个文件，默认值为 `20`；超过限制时发布失败。
+
+附件按照请求数组顺序保存。发布成功后帖子会持有文件引用，用户从个人文件列表删除该文件时不会破坏帖子附件。
 
 如果帖子标题和正文中包含 `@用户名`，被提及的用户会收到 `forum.post.mentioned` 通知。
 
 - `* GET /forum/get_post_list/<fid>` 获取某一论坛的所有帖子
 
-返回体：
+返回体是兼容对象：
 
+```json
+{
+    "posts" : [<legacy_post_row>, ...],
+    "post_rows" : [<post_object>, ...],
+    "pinned_pid" : <pinned_post_id_or_null>
+}
 ```
-[
-    [
-        <post_id>,
-        <title>,
-        <creater>,
-        <content>,
-        <send_time>
+
+`posts` 保留旧版数组结构。新客户端应使用 `post_rows`：
+
+```json
+{
+    "fid" : <fid>,
+    "pid" : <pid>,
+    "title" : <title>,
+    "creater" : <author_uid>,
+    "author_uid" : <author_uid>,
+    "content" : <content>,
+    "send_time" : <send_time>,
+    "attachments" : [
+        {
+            "hash" : <file_hash>,
+            "file_name" : <poster_file_name>,
+            "filename" : <poster_file_name>,
+            "size" : <size>,
+            "mime_type" : <mime_type>,
+            "extension" : <extension>,
+            "download_url" : "/file/get_file/<file_hash>",
+            "send_time" : <file_send_time>,
+            "position" : <position>
+        }
     ]
-]
+}
 ```
+
+没有附件的帖子不包含 `attachments` 字段。附件的 `file_name` 是发帖者上传时使用的名称，不会回退到其他上传者为相同内容使用的名称。
+
+- `* GET /forum/get_post/<fid>/<pid>` 获取单个帖子。
+
+返回一个上述 `post_object`；帖子不存在或路径参数非法时返回空对象。
 
 - `^ POST /forum/remove_post` 删除帖子
 
@@ -154,6 +195,8 @@
 ```
 
 如果操作者不是帖子发布者（即由论坛创始人或管理员删除），帖子发布者会收到 `forum.post.deleted` 通知。
+
+删除帖子时会同时删除附件关系并减少对应文件引用；只有在文件既无有效拥有者也无其他消息/帖子引用时，物理文件才可被清理。
 
 
 - `^ POST /forum/remove_forum` 删除论坛
@@ -217,4 +260,3 @@
 - `forum.post.mentioned` — 在帖子中被 @提及
 - `forum.post.deleted` — 帖子被他人删除
 - `forum.comment.deleted` — 评论被他人删除
-

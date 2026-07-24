@@ -287,7 +287,14 @@ def main(args=None):
     NOTIFICATION_CURSOR = db.NotificationsDb("res/{}/db/notification.db".format(PORT_API), PORT_API)
     MESSAGES_CURSOR = db.MessagesDb("res/{}/db/messages.db".format(PORT_API), PORT_API)
     GROUP_CURSOR = db.GroupDb("res/{}/db/group.db".format(PORT_API), PORT_API)
-    INSTANT_CONTACT = InstantConnect(PORT_API, PORT_TCP, NOTIFICATION_CURSOR, USER_CURSOR, MESSAGES_CURSOR, GROUP_CURSOR)
+    file_references = MESSAGES_CURSOR.get_file_reference_counts()
+    for hashes, count in FORUM_CURSOR.get_file_reference_counts().items():
+        file_references[hashes] = file_references.get(hashes, 0) + count
+    FILE_CURSOR.reconcile_reference_counts(file_references)
+    INSTANT_CONTACT = InstantConnect(
+        PORT_API, PORT_TCP, NOTIFICATION_CURSOR, USER_CURSOR,
+        MESSAGES_CURSOR, GROUP_CURSOR, FILE_CURSOR,
+    )
     FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR, FILE_CURSOR, NOTIFICATION_CURSOR, MESSAGES_CURSOR, GROUP_CURSOR, INSTANT_CONTACT)
     start_api = args.start_api
     if not args.cli_mode:

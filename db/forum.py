@@ -64,6 +64,21 @@ class ForumDb(Db):
     """
         self.execute(cmd)
         self.execute(cmd2)
+        self.execute("""
+    CREATE TABLE IF NOT EXISTS post_attachments (
+        pid INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        file_hash TEXT NOT NULL,
+        display_name TEXT,
+        PRIMARY KEY (pid, position),
+        UNIQUE (pid, file_hash)
+    )
+    """)
+        self.execute("CREATE INDEX IF NOT EXISTS idx_post_attachments_hash ON post_attachments(file_hash)")
+        try:
+            self.execute("ALTER TABLE post_attachments ADD COLUMN display_name TEXT")
+        except Exception:
+            pass
         try:
             self.execute("ALTER TABLE forums ADD COLUMN pinned_pid INTEGER DEFAULT NULL")
         except Exception:
@@ -143,9 +158,10 @@ class ForumDb(Db):
     def query_all_forums(self):
         return self.query("SELECT * FROM forums ORDER BY post_num DESC")
 
-    def send_post(self, fid : int, sender : int, title : str, content : str):
+    def send_post(self, fid : int, sender : int, title : str, content : str, attachments=None):
         if len(title) > 30:
             return False
+        attachments = list(attachments or [])
         def insert_post():
             self.cursor.execute("SELECT MAX(pid) from contents")
             pid = self.cursor.fetchone()[0]
@@ -157,6 +173,18 @@ class ForumDb(Db):
                 "INSERT INTO contents (fid, pid, title, creater, content, send_time) VALUES (?, ?, ?, ?, ?, ?)",
                 (fid, pid, title, sender, content, time())
             )
+            for position, attachment in enumerate(attachments):
+                if isinstance(attachment, dict):
+                    file_hash = attachment["hash"]
+                    display_name = attachment.get("display_name")
+                else:
+                    file_hash = attachment
+                    display_name = None
+                self.cursor.execute(
+                    """INSERT INTO post_attachments
+                       (pid, position, file_hash, display_name) VALUES (?, ?, ?, ?)""",
+                    (pid, position, file_hash, display_name),
+                )
             self.cursor.execute("UPDATE forums set post_num = post_num + 1 where fid = ?", (fid,))
             self.conn.commit()
             return pid
@@ -172,6 +200,40 @@ class ForumDb(Db):
         except Exception as e:
             print("[WARN] send_post: comments JSON 更新失败 fid={} pid={}: {}".format(fid, pid, e))
         return pid
+
+    def get_post_attachments(self, pids) -> dict:
+        pids = list(pids)
+        if not pids:
+            return {}
+        placeholders = ",".join("?" * len(pids))
+        rows = self.query(
+            """SELECT pid, position, file_hash, display_name FROM post_attachments
+               WHERE pid IN ({}) ORDER BY pid, position""".format(placeholders),
+            tuple(pids),
+        )
+        result = {}
+        for pid, position, file_hash, display_name in rows:
+            result.setdefault(pid, []).append({
+                "hash": file_hash,
+                "position": position,
+                "display_name": display_name,
+            })
+        return result
+
+    def count_file_references(self, file_hash : str) -> int:
+        rows = self.query(
+            "SELECT COUNT(*) FROM post_attachments WHERE file_hash = ?",
+            (file_hash,),
+        )
+        return rows[0][0] if rows else 0
+
+    def get_file_reference_counts(self) -> dict:
+        return {
+            row[0]: row[1]
+            for row in self.query(
+                "SELECT file_hash, COUNT(*) FROM post_attachments GROUP BY file_hash"
+            )
+        }
     
     def pin_post(self, fid : int, pid : int):
         if not self.query_post_pid(fid, pid):
@@ -230,25 +292,51 @@ class ForumDb(Db):
         return self.get_member_role(fid, uid) is not None
 
     def delete_forum(self, fid : int):
-        self.execute("DELETE FROM forums WHERE fid = ?", (fid, ))
-        self.execute("DELETE FROM contents WHERE fid = ?", (fid, ))
-        self.execute("DELETE FROM forum_members WHERE fid = ?", (fid, ))
-        self.execute("DROP TABLE IF EXISTS F{}".format(fid))
+        with self.lock:
+            def operation():
+                self.cursor.execute("SELECT pid FROM contents WHERE fid = ?", (fid,))
+                post_ids = [row[0] for row in self.cursor.fetchall()]
+                attachment_hashes = []
+                if post_ids:
+                    placeholders = ",".join("?" * len(post_ids))
+                    self.cursor.execute(
+                        "SELECT file_hash FROM post_attachments WHERE pid IN ({})".format(placeholders),
+                        tuple(post_ids),
+                    )
+                    attachment_hashes = [row[0] for row in self.cursor.fetchall()]
+                    self.cursor.execute(
+                        "DELETE FROM post_attachments WHERE pid IN ({})".format(placeholders),
+                        tuple(post_ids),
+                    )
+                self.cursor.execute("DELETE FROM forums WHERE fid = ?", (fid,))
+                self.cursor.execute("DELETE FROM contents WHERE fid = ?", (fid,))
+                self.cursor.execute("DELETE FROM forum_members WHERE fid = ?", (fid,))
+                self.cursor.execute("DROP TABLE IF EXISTS F{}".format(fid))
+                self.conn.commit()
+                return attachment_hashes
+
+            attachment_hashes = self._execute_with_retry(operation)
         update_comments(self.api_pt, lambda comments: comments.pop(str(fid), None))
+        return attachment_hashes
 
     def delete_post(self, fid : int, pid : int):
         if not self.query_post_pid(fid, pid):
-            return
+            return []
         def do_delete():
+            self.cursor.execute(
+                "SELECT file_hash FROM post_attachments WHERE pid = ? ORDER BY position", (pid,))
+            attachment_hashes = [row[0] for row in self.cursor.fetchall()]
+            self.cursor.execute("DELETE FROM post_attachments WHERE pid = ?", (pid,))
             self.cursor.execute("DELETE FROM contents where pid = ?", (pid,))
             self.cursor.execute(
                 "UPDATE forums set post_num = CASE WHEN post_num > 0 THEN post_num - 1 ELSE 0 END where fid = ?",
                 (fid,)
             )
             self.conn.commit()
+            return attachment_hashes
 
         with self.lock:
-            self._execute_with_retry(do_delete)
+            attachment_hashes = self._execute_with_retry(do_delete)
 
         def remove_post_bucket(comments):
             forum_comments = comments.get(str(fid))
@@ -259,16 +347,28 @@ class ForumDb(Db):
             update_comments(self.api_pt, remove_post_bucket)
         except Exception as e:
             print("[WARN] delete_post: comments JSON 更新失败 fid={} pid={}: {}".format(fid, pid, e))
+        return attachment_hashes
 
-    def clean_user_content(self, uid : int):
+    def clean_user_content(self, uid : int, return_attachment_hashes=False):
         uid = int(uid)
         with self.lock:
             def operation():
+                deleted_attachment_hashes = []
                 self.cursor.execute("DELETE FROM forum_members WHERE uid = ?", (uid,))
                 self.cursor.execute("SELECT fid FROM forums WHERE creater = ?", (uid,))
                 deleted_forums = [row[0] for row in self.cursor.fetchall()]
 
                 for fid in deleted_forums:
+                    self.cursor.execute("SELECT pid FROM contents WHERE fid = ?", (fid,))
+                    for row in self.cursor.fetchall():
+                        self.cursor.execute(
+                            "SELECT file_hash FROM post_attachments WHERE pid = ? ORDER BY position",
+                            (row[0],),
+                        )
+                        deleted_attachment_hashes.extend(
+                            attachment[0] for attachment in self.cursor.fetchall()
+                        )
+                        self.cursor.execute("DELETE FROM post_attachments WHERE pid = ?", (row[0],))
                     self.cursor.execute("DELETE FROM forums WHERE fid = ?", (fid,))
                     self.cursor.execute("DELETE FROM contents WHERE fid = ?", (fid, ))
                     self.cursor.execute("DELETE FROM forum_members WHERE fid = ?", (fid,))
@@ -285,6 +385,15 @@ class ForumDb(Db):
                         continue
 
                     deleted_posts[fid] = post_ids
+                    for pid in post_ids:
+                        self.cursor.execute(
+                            "SELECT file_hash FROM post_attachments WHERE pid = ? ORDER BY position",
+                            (pid,),
+                        )
+                        deleted_attachment_hashes.extend(
+                            attachment[0] for attachment in self.cursor.fetchall()
+                        )
+                        self.cursor.execute("DELETE FROM post_attachments WHERE pid = ?", (pid,))
                     self.cursor.execute("DELETE FROM contents WHERE creater = ? and fid = ?", (uid, fid))
                     self.cursor.execute(
                         "UPDATE forums SET post_num = CASE WHEN post_num >= ? THEN post_num - ? ELSE 0 END WHERE fid = ?",
@@ -292,9 +401,9 @@ class ForumDb(Db):
                     )
 
                 self.conn.commit()
-                return deleted_forums, deleted_posts
+                return deleted_forums, deleted_posts, deleted_attachment_hashes
 
-            deleted_forums, deleted_posts = self._execute_with_retry(operation)
+            deleted_forums, deleted_posts, deleted_attachment_hashes = self._execute_with_retry(operation)
 
         deleted_posts_text = {
             str(fid): {str(pid) for pid in post_ids}
@@ -326,4 +435,6 @@ class ForumDb(Db):
             return True
 
         update_comments(self.api_pt, clean_comments)
+        if return_attachment_hashes:
+            return deleted_attachment_hashes
         return True

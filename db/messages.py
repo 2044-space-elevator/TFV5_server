@@ -22,7 +22,11 @@ class MessagesDb(Db):
                 file_hash TEXT,
                 send_time REAL NOT NULL,
                 quote INTEGER NOT NULL DEFAULT -1,
-                deleted INTEGER NOT NULL DEFAULT 0
+                deleted INTEGER NOT NULL DEFAULT 0,
+                deleted_at REAL,
+                deleted_by INTEGER,
+                file_name TEXT,
+                forwarded INTEGER NOT NULL DEFAULT -1
             )
         """)
         self.execute("""
@@ -46,7 +50,10 @@ class MessagesDb(Db):
     def _migrate(self):
         """尝试修复db"""
         from sqlite3 import OperationalError
-        for col, typ in [("group_id", "INTEGER"), ("client_mid", "TEXT")]:
+        for col, typ in [("group_id", "INTEGER"), ("client_mid", "TEXT"),
+                         ("deleted_at", "REAL"), ("deleted_by", "INTEGER"),
+                          ("file_name", "TEXT"),
+                          ("forwarded", "INTEGER NOT NULL DEFAULT -1")]:
             try:
                 self.execute("ALTER TABLE messages ADD COLUMN {} {}".format(col, typ))
             except OperationalError:
@@ -75,9 +82,10 @@ class MessagesDb(Db):
                 pass
 
     def add_message(self, sender_uid: int, receiver_uid: int, content: str,
-                    content_type: str = 'plain', file_hash: str = None,
-                    quote: int = -1, group_id: int = None,
-                    client_mid: str = None) -> dict:
+                     content_type: str = 'plain', file_hash: str = None,
+                     quote: int = -1, group_id: int = None,
+                      client_mid: str = None, file_name: str = None,
+                      forwarded: int = -1) -> dict:
         send_time = time.time()
         from sqlite3 import IntegrityError
         with self.lock:
@@ -86,10 +94,10 @@ class MessagesDb(Db):
                     self.cursor.execute(
                         """INSERT INTO messages
                            (client_mid, sender_uid, receiver_uid, group_id, content, content_type,
-                            file_hash, send_time, quote)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            file_hash, send_time, quote, file_name, forwarded)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (client_mid, sender_uid, receiver_uid, group_id, content, content_type,
-                         file_hash, send_time, quote),
+                          file_hash, send_time, quote, file_name, forwarded),
                     )
                     mid = self.cursor.lastrowid
                     self.conn.commit()
@@ -122,6 +130,10 @@ class MessagesDb(Db):
             "send_time": send_time,
             "quote": quote,
             "deleted": 0,
+            "deleted_at": None,
+            "deleted_by": None,
+            "file_name": file_name,
+            "forwarded": forwarded,
         }
 
     def query_history(self, uid: int, target_uid: int,
@@ -129,10 +141,10 @@ class MessagesDb(Db):
                       group_id: int = None) -> list:
         """返回历史消息，按 mid 倒序排列。"""
         if group_id is not None:
-            where = "deleted = 0 AND group_id = ?"
+            where = "group_id = ?"
             params = [group_id]
         else:
-            where = ("deleted = 0 AND group_id IS NULL AND "
+            where = ("group_id IS NULL AND "
                      "((sender_uid = ? AND receiver_uid = ?) "
                      "OR (sender_uid = ? AND receiver_uid = ?))")
             params = [uid, target_uid, target_uid, uid]
@@ -142,13 +154,45 @@ class MessagesDb(Db):
             params.append(before_mid)
 
         sql = """SELECT mid, client_mid, sender_uid, receiver_uid, group_id,
-                        content, content_type, file_hash, send_time, quote, deleted
+                        content, content_type, file_hash, send_time, quote, deleted,
+                         deleted_at, deleted_by, file_name, forwarded
                  FROM messages WHERE {} ORDER BY mid DESC LIMIT ?""".format(where)
         params.append(limit)
         return self.query(sql, tuple(params))
 
     _COLUMNS = ["mid", "client_mid", "sender_uid", "receiver_uid", "group_id",
-                "content", "content_type", "file_hash", "send_time", "quote", "deleted"]
+                 "content", "content_type", "file_hash", "send_time", "quote", "deleted",
+                 "deleted_at", "deleted_by", "file_name", "forwarded"]
+
+    @staticmethod
+    def _redact_recalled(record: dict) -> dict:
+        if record.get("deleted"):
+            record["content"] = None
+            record["file_hash"] = None
+        return record
+
+    @staticmethod
+    def _quote_preview(record: dict) -> dict:
+        preview = {
+            "mid": record["mid"],
+            "sender_uid": record["sender_uid"],
+            "content_type": record["content_type"],
+            "content": record["content"][:240] if record["content"] is not None else None,
+            "file_hash": record["file_hash"],
+            "file_name": record.get("file_name"),
+            "deleted": bool(record["deleted"]),
+            "deleted_at": record["deleted_at"],
+        }
+        return MessagesDb._redact_recalled(preview)
+
+    @staticmethod
+    def _same_conversation(message: dict, quoted: dict) -> bool:
+        if message.get("group_id") is not None or quoted.get("group_id") is not None:
+            return (message.get("group_id") is not None
+                    and message.get("group_id") == quoted.get("group_id"))
+        return {message["sender_uid"], message["receiver_uid"]} == {
+            quoted["sender_uid"], quoted["receiver_uid"]
+        }
 
     def serialize_rows(self, rows) -> list:
         records = [dict(zip(self._COLUMNS, r)) for r in rows]
@@ -165,24 +209,69 @@ class MessagesDb(Db):
             mentions.setdefault(mid, []).append(uid)
         for record in records:
             record["mentioned_uids"] = mentions.get(record["mid"], [])
+        quote_mids = sorted({
+            mid for record in records
+            for mid in (record["quote"], record["forwarded"]) if mid >= 0
+        })
+        quote_map = {}
+        if quote_mids:
+            placeholders = ",".join("?" * len(quote_mids))
+            quote_rows = self.query(
+                """SELECT mid, client_mid, sender_uid, receiver_uid, group_id,
+                          content, content_type, file_hash, send_time, quote, deleted,
+                           deleted_at, deleted_by, file_name, forwarded
+                   FROM messages WHERE mid IN ({})""".format(placeholders),
+                tuple(quote_mids),
+            )
+            for row in quote_rows:
+                quote_record = dict(zip(self._COLUMNS, row))
+                quote_map[quote_record["mid"]] = quote_record
+        for record in records:
+            quoted = quote_map.get(record["quote"])
+            record["quote_preview"] = (
+                self._quote_preview(quoted)
+                if quoted and self._same_conversation(record, quoted) else None
+            )
+            forwarded = quote_map.get(record["forwarded"])
+            record["forward_preview"] = (
+                self._quote_preview(forwarded)
+                if forwarded and self._same_conversation(record, forwarded) else None
+            )
+            self._redact_recalled(record)
         return records
+
+    def get_quote_preview(self, mid: int, message=None):
+        rows = self.query(
+            """SELECT mid, client_mid, sender_uid, receiver_uid, group_id,
+                      content, content_type, file_hash, send_time, quote, deleted,
+                        deleted_at, deleted_by, file_name, forwarded FROM messages WHERE mid = ?""",
+            (mid,),
+        )
+        if not rows:
+            return None
+        quoted = dict(zip(self._COLUMNS, rows[0]))
+        if message is not None and not self._same_conversation(message, quoted):
+            return None
+        return self._quote_preview(quoted)
 
     def get_chat_list(self, uid: int) -> list:
         """返回与每个用户的最新单聊消息。
         群聊由 API 接口单独合并。
         """
         rows = self.query(
-            """SELECT partner_uid, mid, client_mid, sender_uid, content, content_type, send_time
+            """SELECT partner_uid, mid, client_mid, sender_uid, content, content_type, send_time,
+                       deleted, deleted_at, file_name
                FROM (
                  SELECT
                    CASE WHEN sender_uid = ? THEN receiver_uid ELSE sender_uid END AS partner_uid,
-                   mid, client_mid, sender_uid, content, content_type, send_time,
+                    mid, client_mid, sender_uid, content, content_type, send_time,
+                     deleted, deleted_at, file_name,
                    ROW_NUMBER() OVER (
                      PARTITION BY CASE WHEN sender_uid = ? THEN receiver_uid ELSE sender_uid END
                      ORDER BY mid DESC
                    ) AS rn
                  FROM messages
-                 WHERE deleted = 0 AND group_id IS NULL
+                  WHERE group_id IS NULL
                    AND (sender_uid = ? OR receiver_uid = ?)
                    AND sender_uid != receiver_uid
                )
@@ -197,9 +286,12 @@ class MessagesDb(Db):
                 "last_mid": r[1],
                 "last_client_mid": r[2],
                 "last_sender_uid": r[3],
-                "last_content": r[4],
+                "last_content": None if r[7] else r[4],
                 "last_content_type": r[5],
                 "last_time": r[6],
+                "last_deleted": bool(r[7]),
+                "last_deleted_at": r[8],
+                "last_file_name": r[9],
             }
             for r in rows
         ]
@@ -207,9 +299,10 @@ class MessagesDb(Db):
     def get_group_last_message(self, group_id: int) -> dict:
         """返回群聊的最新消息，如果没有则返回 None。"""
         rows = self.query(
-            """SELECT mid, sender_uid, content, content_type, send_time
+            """SELECT mid, sender_uid, content, content_type, send_time, deleted, deleted_at,
+                      file_name
                FROM messages
-               WHERE deleted = 0 AND group_id = ?
+               WHERE group_id = ?
                ORDER BY mid DESC LIMIT 1""",
             (group_id,)
         )
@@ -218,9 +311,12 @@ class MessagesDb(Db):
         return {
             "mid": rows[0][0],
             "sender_uid": rows[0][1],
-            "content": rows[0][2],
+            "content": None if rows[0][5] else rows[0][2],
             "content_type": rows[0][3],
             "send_time": rows[0][4],
+            "deleted": bool(rows[0][5]),
+            "deleted_at": rows[0][6],
+            "file_name": rows[0][7],
         }
 
     def get_group_last_messages(self, group_ids: list) -> dict:
@@ -229,12 +325,13 @@ class MessagesDb(Db):
             return {}
         placeholders = ",".join("?" * len(group_ids))
         rows = self.query(
-            """SELECT m.mid, m.sender_uid, m.content, m.content_type, m.send_time, m.group_id
+            """SELECT m.mid, m.sender_uid, m.content, m.content_type, m.send_time, m.group_id,
+                       m.deleted, m.deleted_at, m.file_name
                FROM messages m
                INNER JOIN (
                    SELECT group_id, MAX(mid) AS max_mid
                    FROM messages
-                   WHERE deleted = 0 AND group_id IN ({})
+                    WHERE group_id IN ({})
                    GROUP BY group_id
                ) latest ON m.group_id = latest.group_id AND m.mid = latest.max_mid
             """.format(placeholders),
@@ -242,8 +339,10 @@ class MessagesDb(Db):
         )
         return {
             r[5]: {
-                "mid": r[0], "sender_uid": r[1], "content": r[2],
-                "content_type": r[3], "send_time": r[4],
+                "mid": r[0], "sender_uid": r[1], "content": None if r[6] else r[2],
+                "content_type": r[3], "send_time": r[4], "deleted": bool(r[6]),
+                "deleted_at": r[7],
+                "file_name": r[8],
             }
             for r in rows
         }
@@ -264,9 +363,77 @@ class MessagesDb(Db):
         return (r[0] == sender_uid and r[1] == target_uid) or \
                (r[0] == target_uid and r[1] == sender_uid)
 
+    def get_message(self, mid: int, include_recalled_original=False):
+        rows = self.query(
+            """SELECT mid, client_mid, sender_uid, receiver_uid, group_id,
+                      content, content_type, file_hash, send_time, quote, deleted,
+                       deleted_at, deleted_by, file_name, forwarded FROM messages WHERE mid = ?""",
+            (mid,),
+        )
+        if not rows:
+            return None
+        record = dict(zip(self._COLUMNS, rows[0]))
+        if not include_recalled_original:
+            self._redact_recalled(record)
+        return record
+
+    def request_matches(self, mid : int, sender_uid : int, receiver_uid : int,
+                        content : str, content_type : str, file_hash=None,
+                         quote : int = -1, group_id=None, forwarded : int = -1) -> bool:
+        message = self.get_message(mid, include_recalled_original=True)
+        if message is None:
+            return False
+        return (
+            message["sender_uid"] == sender_uid
+            and message["receiver_uid"] == receiver_uid
+            and message["group_id"] == group_id
+            and message["content"] == content
+            and message["content_type"] == content_type
+            and message["file_hash"] == file_hash
+            and message["quote"] == quote
+            and message["forwarded"] == forwarded
+        )
+
+    def get_by_client_mid(self, sender_uid : int, client_mid : str):
+        if not client_mid:
+            return None
+        rows = self.query(
+            "SELECT mid FROM messages WHERE sender_uid = ? AND client_mid = ?",
+            (sender_uid, client_mid),
+        )
+        return self.get_message(rows[0][0]) if rows else None
+
+    def recall_message(self, mid: int, deleted_by: int) -> bool:
+        with self.lock:
+            def operation():
+                self.cursor.execute(
+                    """UPDATE messages SET deleted = 1, deleted_at = ?, deleted_by = ?
+                       WHERE mid = ? AND deleted = 0""",
+                    (time.time(), deleted_by, mid),
+                )
+                changed = self.cursor.rowcount > 0
+                self.conn.commit()
+                return changed
+            return self._execute_with_retry(operation)
+
     def delete_message(self, mid: int) -> bool:
-        self.execute("UPDATE messages SET deleted = 1 WHERE mid = ?", (mid,))
-        return True
+        return self.recall_message(mid, 0)
+
+    def count_file_references(self, file_hash: str) -> int:
+        rows = self.query(
+            "SELECT COUNT(*) FROM messages WHERE file_hash = ?",
+            (file_hash,),
+        )
+        return rows[0][0] if rows else 0
+
+    def get_file_reference_counts(self) -> dict:
+        return {
+            row[0]: row[1]
+            for row in self.query(
+                """SELECT file_hash, COUNT(*) FROM messages
+                   WHERE file_hash IS NOT NULL GROUP BY file_hash"""
+            )
+        }
 
     def get_room_preferences(self, uid: int) -> dict:
         rows = self.query(

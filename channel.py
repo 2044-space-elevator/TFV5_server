@@ -10,6 +10,7 @@ import base64
 import os
 import threading
 import logging
+import mimetypes
 from collections import defaultdict
 from mention_utils import resolve_mentioned_uids, should_alert
 
@@ -21,6 +22,17 @@ class _InvalidHandshakeFilter(logging.Filter):
             record.getMessage() == "opening handshake failed"
             and isinstance(exception, InvalidMessage)
         )
+
+
+def _metadata_with_name(metadata, file_name):
+    if not metadata or not file_name:
+        return metadata
+    result = dict(metadata)
+    result["file_name"] = file_name
+    result["filename"] = file_name
+    result["mime_type"] = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+    result["extension"] = os.path.splitext(file_name)[1].lower()
+    return result
 
 
 def can_access_room(user_cursor, group_cursor, uid: int, room_id: str) -> bool:
@@ -37,7 +49,8 @@ def can_access_room(user_cursor, group_cursor, uid: int, room_id: str) -> bool:
     return False
 
 class InstantConnect():
-    def __init__(self, port_api, port_tcp, notification_cursor, user_cursor, messages_cursor, group_cursor):
+    def __init__(self, port_api, port_tcp, notification_cursor, user_cursor, messages_cursor,
+                 group_cursor, file_cursor=None):
         self.port_api = port_api
         self.port_tcp = port_tcp
         self.notification_cursor = notification_cursor
@@ -48,6 +61,7 @@ class InstantConnect():
         self.user_cursor = user_cursor
         self.group_cursor = group_cursor
         self.messages_cursor = messages_cursor
+        self.file_cursor = file_cursor
         self._load_config()
         self.aes_key = dict()
         self.pri_key = crypto.load_pri("res/{}/secret/pri.pem".format(port_api))
@@ -146,6 +160,22 @@ class InstantConnect():
                 self._cleanup_client(websocket)
 
     def notify_user(self, uid : int, notification : dict):
+        notification = dict(notification)
+        if notification.get("event") in {"message.plain", "message.file"}:
+            mid = notification.get("mid")
+            message = self.messages_cursor.get_message(mid) if mid is not None else None
+            if message and message.get("deleted"):
+                notification["content"] = None
+                notification.pop("file_hash", None)
+                notification.pop("file", None)
+                notification["deleted"] = True
+                notification["deleted_at"] = message.get("deleted_at")
+                notification["deleted_by"] = message.get("deleted_by")
+        preview = notification.get("quote_preview")
+        if isinstance(preview, dict) and preview.get("mid") is not None:
+            latest_preview = self.messages_cursor.get_quote_preview(preview["mid"])
+            if latest_preview is not None:
+                notification["quote_preview"] = latest_preview
         record = {
             "time_stamp" : self.notification_cursor.add_event(uid, notification),
             "info" : notification
@@ -266,9 +296,18 @@ class InstantConnect():
                             content_type='plain', quote=quote,
                             client_mid=client_mid
                         )
-                        self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
                         if msg_record.get("duplicate"):
+                            if not self.messages_cursor.request_matches(
+                                    msg_record["mid"], sender_uid, send_to, plain, "plain",
+                                    quote=quote):
+                                self._queue_ack(
+                                    websocket, client_mid, status="failed",
+                                    error="client_mid_conflict",
+                                )
+                                continue
+                            self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
                             continue
+                        self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
                         mentioned_uids = resolve_mentioned_uids(
                             plain, self.user_cursor, [send_to], exclude_uid=sender_uid
                         )
@@ -286,6 +325,9 @@ class InstantConnect():
                             "client_mid" : client_mid,
                             "room_id" : sender_str
                         }
+                        recv_notif["quote_preview"] = (
+                            self.messages_cursor.get_quote_preview(quote, msg_record) if quote >= 0 else None
+                        )
                         recv_notif["mentioned_uids"] = mentioned_uids
                         recv_notif["mentions_me"] = send_to in mentioned_uids
                         recv_notif["should_alert"] = should_alert(
@@ -314,9 +356,18 @@ class InstantConnect():
                             content_type='plain', quote=quote, group_id=gid,
                             client_mid=client_mid
                         )
-                        self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
                         if msg_record.get("duplicate"):
+                            if not self.messages_cursor.request_matches(
+                                    msg_record["mid"], self.clients_belonged[websocket], 0,
+                                    plain, "plain", quote=quote, group_id=gid):
+                                self._queue_ack(
+                                    websocket, client_mid, status="failed",
+                                    error="client_mid_conflict",
+                                )
+                                continue
+                            self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
                             continue
+                        self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
                         mentioned_uids = resolve_mentioned_uids(
                             plain,
                             self.user_cursor,
@@ -337,6 +388,9 @@ class InstantConnect():
                             "room_id" : "G{}".format(gid),
                             "group_id" : gid
                         }
+                        notif_dict["quote_preview"] = (
+                            self.messages_cursor.get_quote_preview(quote, msg_record) if quote >= 0 else None
+                        )
                         for user in members:
                             user_notif = dict(notif_dict)
                             user_notif["mentioned_uids"] = mentioned_uids
@@ -378,14 +432,33 @@ class InstantConnect():
                         if not self.user_cursor.is_friend(sender_uid, send_to):
                             self._queue_ack(websocket, client_mid, status="failed", error="not_friends")
                             continue
-                        msg_record = self.messages_cursor.add_message(
-                            sender_uid, send_to, file_hashes,
-                            content_type='file', file_hash=file_hashes, quote=quote,
-                            client_mid=client_mid
-                        )
-                        self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
-                        if msg_record.get("duplicate"):
+                        metadata = (self.file_cursor.acquire_reference(sender_uid, file_hashes)
+                                    if self.file_cursor is not None else None)
+                        if metadata is None:
+                            self._queue_ack(websocket, client_mid, status="failed", error="file_not_owned")
                             continue
+                        try:
+                            msg_record = self.messages_cursor.add_message(
+                                sender_uid, send_to, file_hashes,
+                                content_type='file', file_hash=file_hashes, quote=quote,
+                                client_mid=client_mid, file_name=metadata["file_name"]
+                            )
+                        except Exception:
+                            self.file_cursor.decrement_ref(file_hashes)
+                            raise
+                        if msg_record.get("duplicate"):
+                            self.file_cursor.decrement_ref(file_hashes)
+                            if not self.messages_cursor.request_matches(
+                                    msg_record["mid"], sender_uid, send_to, file_hashes, "file",
+                                    file_hash=file_hashes, quote=quote):
+                                self._queue_ack(
+                                    websocket, client_mid, status="failed",
+                                    error="client_mid_conflict",
+                                )
+                                continue
+                            self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
+                            continue
+                        self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
                         sender_str = "U{}".format(sender_uid)
                         recv_notif = {
                             "event" : "message.file",
@@ -398,6 +471,14 @@ class InstantConnect():
                             "client_mid" : client_mid,
                             "room_id" : sender_str
                         }
+                        recv_notif["quote_preview"] = (
+                            self.messages_cursor.get_quote_preview(quote, msg_record) if quote >= 0 else None
+                        )
+                        if self.file_cursor is not None:
+                            recv_notif["file"] = _metadata_with_name(
+                                self.file_cursor.get_metadata(file_hashes, owner_uid=sender_uid),
+                                metadata["file_name"],
+                            )
                         recv_notif["mentioned_uids"] = []
                         recv_notif["mentions_me"] = False
                         recv_notif["should_alert"] = should_alert(
@@ -420,14 +501,34 @@ class InstantConnect():
                         if not self.clients_belonged[websocket] in members:
                             self._queue_ack(websocket, client_mid, status="failed", error="not_group_member")
                             continue
-                        msg_record = self.messages_cursor.add_message(
-                            self.clients_belonged[websocket], 0, file_hashes,
-                            content_type='file', file_hash=file_hashes, quote=quote, group_id=gid,
-                            client_mid=client_mid
-                        )
-                        self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
-                        if msg_record.get("duplicate"):
+                        sender_uid = self.clients_belonged[websocket]
+                        metadata = (self.file_cursor.acquire_reference(sender_uid, file_hashes)
+                                    if self.file_cursor is not None else None)
+                        if metadata is None:
+                            self._queue_ack(websocket, client_mid, status="failed", error="file_not_owned")
                             continue
+                        try:
+                            msg_record = self.messages_cursor.add_message(
+                                sender_uid, 0, file_hashes,
+                                content_type='file', file_hash=file_hashes, quote=quote, group_id=gid,
+                                client_mid=client_mid, file_name=metadata["file_name"]
+                            )
+                        except Exception:
+                            self.file_cursor.decrement_ref(file_hashes)
+                            raise
+                        if msg_record.get("duplicate"):
+                            self.file_cursor.decrement_ref(file_hashes)
+                            if not self.messages_cursor.request_matches(
+                                    msg_record["mid"], sender_uid, 0, file_hashes, "file",
+                                    file_hash=file_hashes, quote=quote, group_id=gid):
+                                self._queue_ack(
+                                    websocket, client_mid, status="failed",
+                                    error="client_mid_conflict",
+                                )
+                                continue
+                            self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
+                            continue
+                        self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
                         notif_dict = {
                             "event" : "message.file",
                             "title" : str(msg_record["send_time"]),
@@ -440,6 +541,16 @@ class InstantConnect():
                             "room_id" : "G{}".format(gid),
                             "group_id" : gid
                         }
+                        notif_dict["quote_preview"] = (
+                            self.messages_cursor.get_quote_preview(quote, msg_record) if quote >= 0 else None
+                        )
+                        if self.file_cursor is not None:
+                            notif_dict["file"] = _metadata_with_name(
+                                self.file_cursor.get_metadata(
+                                    file_hashes, owner_uid=self.clients_belonged[websocket]
+                                ),
+                                metadata["file_name"],
+                            )
                         for user in members:
                             user_notif = dict(notif_dict)
                             user_notif["mentioned_uids"] = []

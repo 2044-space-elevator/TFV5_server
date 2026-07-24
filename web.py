@@ -14,9 +14,19 @@ from rate_limiter import RateLimiter
 from mention_utils import resolve_mentioned_uids, should_alert
 import time
 import threading
+import mimetypes
 
 def bool_res() -> tuple: 
     return (str(time.time()) + "False", str(time.time()) + "True")
+
+
+def can_recall_message(operator_uid : int, operator_auth : str, message : dict,
+                       group_role : int = 0) -> bool:
+    if message["sender_uid"] == operator_uid:
+        return True
+    if message["group_id"] is not None:
+        return operator_auth in {"admin", "root"} or group_role >= 1
+    return operator_auth in {"admin", "root"}
 
 def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, forum_cursor, file_cursor, notification_cursor, messages_cursor, group_cursor, instant_contact):
     """
@@ -355,6 +365,80 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             updates["introduction"] = req["introduction"]
         return updates
 
+    def file_metadata(file_hash, owner_uid=None):
+        return file_cursor.get_metadata(file_hash, owner_uid=owner_uid) if file_hash else None
+
+    def with_display_file_name(metadata, display_name):
+        if not metadata or not display_name:
+            return metadata
+        result = dict(metadata)
+        result["file_name"] = display_name
+        result["filename"] = display_name
+        result["mime_type"] = mimetypes.guess_type(display_name)[0] or "application/octet-stream"
+        result["extension"] = os.path.splitext(display_name)[1].lower()
+        return result
+
+    def enrich_message_files(records):
+        metadata_cache = {}
+        for record in records:
+            hashes = record.get("file_hash")
+            if hashes:
+                cache_key = (hashes, record.get("sender_uid"))
+                metadata_cache.setdefault(
+                    cache_key, file_metadata(hashes, record.get("sender_uid"))
+                )
+                metadata = metadata_cache[cache_key]
+                if metadata and record.get("file_name"):
+                    metadata = with_display_file_name(metadata, record["file_name"])
+                record["file"] = metadata
+            preview = record.get("quote_preview")
+            if preview and preview.get("file_hash"):
+                hashes = preview["file_hash"]
+                cache_key = (hashes, preview.get("sender_uid"))
+                metadata_cache.setdefault(
+                    cache_key, file_metadata(hashes, preview.get("sender_uid"))
+                )
+                preview["file"] = metadata_cache[cache_key]
+        return records
+
+    def serialize_post_rows(rows):
+        attachments = forum_cursor.get_post_attachments([row[1] for row in rows])
+        metadata_cache = {}
+        result = []
+        for row in rows:
+            item = {
+                "fid": row[0], "pid": row[1], "title": row[2],
+                "creater": row[3], "author_uid": row[3],
+                "content": row[4], "send_time": row[5],
+            }
+            post_attachments = []
+            for attachment in attachments.get(row[1], []):
+                hashes = attachment["hash"]
+                cache_key = (hashes, row[3])
+                metadata_cache.setdefault(cache_key, file_metadata(hashes, row[3]))
+                metadata = metadata_cache[cache_key]
+                if metadata:
+                    display_name = attachment.get("display_name") or metadata.get("file_name")
+                    metadata = with_display_file_name(metadata, display_name)
+                    metadata["position"] = attachment["position"]
+                    post_attachments.append(metadata)
+            if post_attachments:
+                item["attachments"] = post_attachments
+            result.append(item)
+        return result
+
+    def retain_cross_db_file_references(uid, only_hash=None):
+        for row in file_cursor.get_user_files(uid):
+            hashes = row[0]
+            if only_hash is not None and hashes != only_hash:
+                continue
+            reference_count = (
+                messages_cursor.count_file_references(hashes)
+                + forum_cursor.count_file_references(hashes)
+            )
+            if reference_count:
+                file_cursor.ensure_content_retained(hashes, reference_count)
+
     def cleanup_forum_queue(target_uid : int):
         target_uid = int(target_uid)
         with locks['queue']:
@@ -413,9 +497,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         for fid in deleted_forum_ids:
             avatar.clean_avatar(port_api, fid, "forum")
 
+        retain_cross_db_file_references(target_uid)
         file.clean_user_files(port_api, target_uid, file_cursor)
         group_cursor.remove_user_membership(target_uid)
-        forum_cursor.clean_user_content(target_uid)
+        deleted_attachment_hashes = forum_cursor.clean_user_content(
+            target_uid, return_attachment_hashes=True
+        )
+        file.release_references(
+            port_api, deleted_attachment_hashes, file_cursor,
+            read_config().get("file_last_time", 72),
+        )
         cleanup_forum_queue(target_uid)
         return True
 
@@ -1155,6 +1246,21 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         title = req["title"]
         content = req["content"]
+        raw_attachments = req.get("attachments", req.get("attachment_hashes", []))
+        if raw_attachments is None:
+            raw_attachments = []
+        if not isinstance(raw_attachments, list):
+            return bool_res()[False]
+        if len(raw_attachments) > read_config().get("max_post_attachments", 20):
+            return bool_res()[False]
+        attachment_hashes = []
+        for item in raw_attachments:
+            hashes = item.get("hash") if isinstance(item, dict) else item
+            if (not isinstance(hashes, str) or len(hashes) != 64
+                    or not all(char in "0123456789abcdefABCDEF" for char in hashes)
+                    or hashes in attachment_hashes):
+                return bool_res()[False]
+            attachment_hashes.append(hashes)
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         user_row = get_user_row(uid)
@@ -1168,8 +1274,25 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         max_post = read_config().get("max_post_content_length", 20000)
         if max_post > 0 and len(str(content)) > max_post:
             return bool_res()[False]
-        pid = forum_cursor.send_post(fid, uid, title, content)
+        acquired = []
+        attachment_records = []
+        for hashes in attachment_hashes:
+            metadata = file_cursor.acquire_reference(uid, hashes)
+            if metadata is None:
+                file.release_references(port_api, acquired, file_cursor)
+                return bool_res()[False]
+            acquired.append(hashes)
+            attachment_records.append({
+                "hash": hashes,
+                "display_name": metadata["file_name"],
+            })
+        try:
+            pid = forum_cursor.send_post(fid, uid, title, content, attachment_records)
+        except Exception:
+            file.release_references(port_api, acquired, file_cursor)
+            raise
         if pid is False:
+            file.release_references(port_api, acquired, file_cursor)
             return bool_res()[False]
         forum_info = forum_cursor.query_forum_fid(fid)
         forum_name = forum_info[0][1] if forum_info else str(fid)
@@ -1198,9 +1321,22 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 pinned_pid = forum_cursor.get_pinned_pid(fid_int)
             except Exception:
                 pinned_pid = None
-            return json.dumps({"posts": posts, "pinned_pid": pinned_pid})
+            return json.dumps({
+                "posts": posts,
+                "post_rows": serialize_post_rows(posts),
+                "pinned_pid": pinned_pid,
+            }, ensure_ascii=False)
         except OperationalError as e:
             return {}
+
+    @app.route("/forum/get_post/<fid>/<pid>")
+    def get_post_detail(fid : str, pid : str):
+        if not fid.isdigit() or not pid.isdigit():
+            return {}
+        rows = forum_cursor.query_post_pid(int(fid), int(pid))
+        if not rows:
+            return {}
+        return json.dumps(serialize_post_rows(rows)[0], ensure_ascii=False)
     
     @api("/forum/remove_forum", methods=["POST"])
     def remove_forum(req):
@@ -1223,7 +1359,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             avatar.clean_avatar(port_api, fid, "forum")
         except Exception:
             return bool_res()[False]
-        forum_cursor.delete_forum(fid)
+        attachment_hashes = forum_cursor.delete_forum(fid)
+        file.release_references(port_api, attachment_hashes, file_cursor)
         return bool_res()[True]
     
     @api("/forum/edit_forum", methods=["POST"])
@@ -1295,7 +1432,11 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_stat = user_row[4]
         if not (user_stat in ["admin", "root"] or uid == creater or uid == creater_post):
             return bool_res()[False]
-        forum_cursor.delete_post(fid, pid)
+        attachment_hashes = forum_cursor.delete_post(fid, pid)
+        file.release_references(
+            port_api, attachment_hashes, file_cursor,
+            read_config().get("file_last_time", 72),
+        )
         if uid != creater_post:
             notify_user(
                 creater_post, "forum.post.deleted", "你的帖子已被删除",
@@ -1704,7 +1845,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             "result" : bool_res()[True],
             "hash" : hashes,
             "download_url" : "/file/get_file/{}".format(hashes),
-            "info_url" : "/file/get_file_info/{}".format(hashes)
+            "info_url" : "/file/get_file_info/{}".format(hashes),
+            "file" : file_metadata(hashes, uid),
         }, ensure_ascii=False)
 
     @api('/file/dereference_file', methods=['POST'])
@@ -1714,6 +1856,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         hashes = req["hash"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
+        retain_cross_db_file_references(uid, hashes)
         file_last_time = read_config().get("file_last_time", 72)
         return bool_res()[file.dereference_file(port_api, uid, hashes, file_cursor, file_last_time)]
 
@@ -1732,7 +1875,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 "upload_time" : row[2],
                 "size" : row[3],
                 "ref_count" : row[4],
-                "upload_user_count" : row[5]
+                "upload_user_count" : row[5],
+                "mime_type" : row[6] or "application/octet-stream",
+                "extension" : row[7] or "",
+                "download_url" : "/file/get_file/{}".format(row[0]),
             })
         return json.dumps(result, ensure_ascii=False)
 
@@ -1758,6 +1904,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         hashes = req["hash"]
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
+        retain_cross_db_file_references(uid, hashes)
         return bool_res()[file.delete_user_file(port_api, uid, hashes, file_cursor)]
 
     @api('/file/admin_get_all_files', methods=['POST'])
@@ -1792,7 +1939,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 "size" : row[4],
                 "ref_count" : row[5],
                 "upload_user_count" : row[6],
-                "sender" : row[7]
+                "sender" : row[7],
+                "mime_type" : row[8] or "application/octet-stream",
+                "extension" : row[9] or "",
+                "download_url" : "/file/get_file/{}".format(row[1]),
             })
         return json.dumps(result, ensure_ascii=False)
 
@@ -1814,24 +1964,17 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
     @app.route('/file/get_file_info/<hashes>')
     def get_file_info(hashes):
-        qry = file_cursor.return_file(hashes)
-        if not qry:
+        metadata = file_metadata(hashes)
+        if metadata is None:
             return {}
-        row = qry[0]
-        ref_count = row[5] if len(row) > 5 else 1
-        last_ref_time = row[6] if len(row) > 6 else row[2]
-        size = row[7] if len(row) > 7 else 0
-        upload_user_count = row[8] if len(row) > 8 else 1
-        return {
-            "sender" : row[0],
-            "file_name" : row[1],
-            "send_time" : row[2],
-            "hash" : row[3],
-            "ref_count" : ref_count,
-            "last_ref_time" : last_ref_time,
-            "size" : size,
-            "upload_user_count" : upload_user_count
-        }
+        qry = file_cursor.return_file(hashes)[0]
+        metadata.update({
+            "sender": qry[0],
+            "ref_count": qry[5] if len(qry) > 5 else 1,
+            "last_ref_time": qry[6] if len(qry) > 6 else qry[2],
+            "upload_user_count": qry[8] if len(qry) > 8 else 1,
+        })
+        return metadata
 
     @app.route("/file/get_file/<hashes>")
     def get_file(hashes : str):
@@ -1839,10 +1982,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not qry:
             return ("", 404)
         row = qry[0]
-        upload_user_count = row[8] if len(row) > 8 else 1
-        if upload_user_count <= 0:
-            return ("", 404)
-        return send_file("res/{}/file/{}.file".format(port_api, hashes), download_name=row[1], as_attachment=True)
+        metadata = file_metadata(hashes) or {}
+        return send_file(
+            "res/{}/file/{}.file".format(port_api, hashes),
+            download_name=row[1], as_attachment=True,
+            mimetype=metadata.get("mime_type"),
+        )
     
     @api("/announcement/upload_announcement", methods=['POST'])
     def upload_announcement(req):
@@ -2373,6 +2518,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             content_type = str(req.get("content_type", "plain"))
             client_mid = req.get("client_mid")
             quote = int(req.get("quote", -1))
+            forwarded = int(req.get("forwarded", -1))
+            if quote < -1 or forwarded < -1 or (quote >= 0 and forwarded >= 0):
+                return bool_res()[False]
             if content_type not in ("plain", "file"):
                 return bool_res()[False]
             file_hash = None
@@ -2391,18 +2539,55 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             user_stat = user_row[4]
             if user_stat == 'banned':
                 return bool_res()[False]
+            file_record = None
 
             target_uid = 0
             group_id = None
             if recipient.startswith('U'):
                 target_uid = int(recipient[1:])
-                if not user_cursor.is_friend(uid, target_uid):
-                    return bool_res()[False]
             elif recipient.startswith('G'):
                 group_id = int(recipient[1:])
-                if not group_cursor.is_member(group_id, uid):
-                    return bool_res()[False]
             else:
+                return bool_res()[False]
+
+            source_message = None
+            if forwarded >= 0:
+                if not messages_cursor.verify_quote(
+                        forwarded, uid, target_uid, group_id):
+                    return bool_res()[False]
+                source_message = messages_cursor.get_message(forwarded)
+                if source_message is None:
+                    return bool_res()[False]
+                content_type = source_message["content_type"]
+                content = source_message["content"]
+                file_hash = source_message["file_hash"]
+
+            existing = messages_cursor.get_by_client_mid(uid, client_mid)
+            if existing is not None:
+                if not messages_cursor.request_matches(
+                        existing["mid"], uid, target_uid, content, content_type,
+                        file_hash=file_hash, quote=quote, group_id=group_id,
+                        forwarded=forwarded):
+                    return json.dumps({
+                        "success": False, "error": "client_mid_conflict"
+                    })
+                existing["quote_preview"] = (
+                    messages_cursor.get_quote_preview(existing["quote"], existing)
+                    if existing["quote"] >= 0 else None
+                )
+                existing["forward_preview"] = (
+                    messages_cursor.get_quote_preview(existing["forwarded"], existing)
+                    if existing["forwarded"] >= 0 else None
+                )
+                enrich_message_files([existing])
+                return json.dumps({
+                    "mid": existing["mid"], "client_mid": client_mid,
+                    "status": "sent", "message": existing,
+                }, ensure_ascii=False)
+
+            if group_id is not None and not group_cursor.is_member(group_id, uid):
+                return bool_res()[False]
+            if group_id is None and not user_cursor.is_friend(uid, target_uid):
                 return bool_res()[False]
 
             if content_type == "plain" and len(content) > read_config().get("max_message_length", 10000):
@@ -2414,14 +2599,57 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 if group_id is not None and not group_cursor.is_member(group_id, uid):
                     return bool_res()[False]
 
-            msg_record = messages_cursor.add_message(
-                uid, target_uid, content,
-                content_type=content_type, file_hash=file_hash,
-                quote=quote, group_id=group_id, client_mid=client_mid
-            )
+            if file_hash:
+                if forwarded >= 0:
+                    file_record = file_cursor.acquire_forward_reference(file_hash)
+                    if file_record is not None:
+                        file_record["file_name"] = (
+                            source_message.get("file_name")
+                            or file_record["file_name"]
+                        )
+                else:
+                    file_record = file_cursor.acquire_reference(uid, file_hash)
+                if file_record is None:
+                    return bool_res()[False]
+            try:
+                msg_record = messages_cursor.add_message(
+                    uid, target_uid, content,
+                    content_type=content_type, file_hash=file_hash,
+                    quote=quote, group_id=group_id, client_mid=client_mid,
+                    file_name=file_record["file_name"] if file_record else None,
+                    forwarded=forwarded,
+                )
+            except Exception:
+                if file_hash:
+                    file.release_references(port_api, [file_hash], file_cursor)
+                raise
 
             if msg_record.get("duplicate"):
-                return json.dumps({"mid": msg_record["mid"], "client_mid": client_mid, "status": "sent"})
+                if file_hash:
+                    file.release_references(port_api, [file_hash], file_cursor)
+                if not messages_cursor.request_matches(
+                        msg_record["mid"], uid, target_uid, content, content_type,
+                        file_hash=file_hash, quote=quote, group_id=group_id,
+                        forwarded=forwarded):
+                    return json.dumps({
+                        "success": False, "error": "client_mid_conflict"
+                    })
+                existing = messages_cursor.get_message(msg_record["mid"])
+                if existing:
+                    existing["quote_preview"] = (
+                        messages_cursor.get_quote_preview(existing["quote"], existing)
+                        if existing["quote"] >= 0 else None
+                    )
+                    existing["forward_preview"] = (
+                        messages_cursor.get_quote_preview(
+                            existing["forwarded"], existing
+                        ) if existing["forwarded"] >= 0 else None
+                    )
+                    enrich_message_files([existing])
+                return json.dumps({
+                    "mid": msg_record["mid"], "client_mid": client_mid,
+                    "status": "sent", "message": existing,
+                }, ensure_ascii=False)
 
             if content_type == "plain":
                 allowed_mentions = group_cursor.get_member_uids(group_id) if group_id else [target_uid]
@@ -2442,11 +2670,20 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             notif["mid"] = msg_record["mid"]
             notif["client_mid"] = client_mid
             notif["mentioned_uids"] = mentioned_uids
+            notif["quote_preview"] = (
+                messages_cursor.get_quote_preview(quote, msg_record) if quote >= 0 else None
+            )
+            notif["forwarded"] = forwarded
+            notif["forward_preview"] = (
+                messages_cursor.get_quote_preview(forwarded, msg_record)
+                if forwarded >= 0 else None
+            )
             if group_id:
                 notif["group_id"] = group_id
                 notif["room_id"] = "G{}".format(group_id)
             if file_hash:
                 notif["file_hash"] = file_hash
+                notif["file"] = file_metadata(file_hash, uid)
 
             if group_id:
                 room_id = "G{}".format(group_id)
@@ -2471,7 +2708,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 instant_contact.notify_user(target_uid, recv_notif)
                 instant_contact.notify_user(uid, sender_notif)
 
-            return json.dumps({"mid": msg_record["mid"], "client_mid": client_mid, "status": "sent"})
+            response_message = dict(msg_record)
+            response_message["mentioned_uids"] = mentioned_uids
+            response_message["quote_preview"] = notif["quote_preview"]
+            response_message["forward_preview"] = notif["forward_preview"]
+            enrich_message_files([response_message])
+            return json.dumps({
+                "mid": msg_record["mid"], "client_mid": client_mid,
+                "status": "sent", "message": response_message,
+            }, ensure_ascii=False)
         except Exception:
             return bool_res()[False]
 
@@ -2532,6 +2777,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 "last_content": last["content"] if last else None,
                 "last_content_type": last["content_type"] if last else None,
                 "last_time": last["send_time"] if last else None,
+                "last_deleted": bool(last.get("deleted")) if last else False,
+                "last_deleted_at": last.get("deleted_at") if last else None,
+                "last_file_name": last.get("file_name") if last else None,
             }
 
         direct_puids = [k for k in partner_map.keys() if k >= 0]
@@ -2562,6 +2810,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                     "last_time": chat.get("last_time"),
                     "last_sender_uid": chat.get("last_sender_uid"),
                     "last_mid": chat.get("last_mid"),
+                    "last_deleted": bool(chat.get("last_deleted", False)),
+                    "last_deleted_at": chat.get("last_deleted_at"),
+                    "last_file": (
+                        with_display_file_name(
+                            file_metadata(chat.get("last_content"), chat.get("last_sender_uid")),
+                            chat.get("last_file_name"),
+                        )
+                        if chat.get("last_content_type") == "file"
+                        and not chat.get("last_deleted") else None
+                    ),
                     "is_friend": False,
                     "is_pinned": pref.get("is_pinned") if pref else None,
                     "notify_level": pref.get("notify_level") if pref else None,
@@ -2580,6 +2838,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                     "last_time": chat.get("last_time"),
                     "last_sender_uid": chat.get("last_sender_uid"),
                     "last_mid": chat.get("last_mid"),
+                    "last_deleted": bool(chat.get("last_deleted", False)),
+                    "last_deleted_at": chat.get("last_deleted_at"),
+                    "last_file": (
+                        with_display_file_name(
+                            file_metadata(chat.get("last_content"), chat.get("last_sender_uid")),
+                            chat.get("last_file_name"),
+                        )
+                        if chat.get("last_content_type") == "file"
+                        and not chat.get("last_deleted") else None
+                    ),
                     "is_friend": key in friend_uids,
                     "is_pinned": pref.get("is_pinned") if pref else None,
                     "notify_level": pref.get("notify_level") if pref else None,
@@ -2622,6 +2890,92 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             uid, room_id, is_pinned=is_pinned, notify_level=notify_level
         )]
 
+    @api("/message/recall", methods=['POST'])
+    def recall_message(req):
+        try:
+            uid = int(req["uid"])
+            password = req["password"]
+            mid = int(req["mid"])
+        except (KeyError, TypeError, ValueError):
+            return json.dumps({"success": False, "error": "invalid_request"})
+        if not user_cursor.verify_user(uid, password):
+            return json.dumps({"success": False, "error": "auth_failed"})
+        operator = get_user_row(uid)
+        message = messages_cursor.get_message(mid, include_recalled_original=True)
+        if operator is None or message is None:
+            return json.dumps({"success": False, "error": "not_found"})
+        if message["deleted"]:
+            return json.dumps({"success": False, "error": "already_recalled"})
+
+        group_role = (group_cursor.is_admin(message["group_id"], uid)
+                      if message["group_id"] is not None else 0)
+        allowed = can_recall_message(uid, operator[4], message, group_role)
+        if not allowed:
+            return json.dumps({"success": False, "error": "forbidden"})
+        if not messages_cursor.recall_message(mid, uid):
+            return json.dumps({"success": False, "error": "already_recalled"})
+
+        recalled = messages_cursor.get_message(mid)
+        notification_cursor.redact_recalled_message(mid)
+        event = {
+            "event": "message.recalled",
+            "title": str(recalled["deleted_at"]),
+            "content": None,
+            "sender": uid,
+            "mid": mid,
+            "deleted": True,
+            "deleted_at": recalled["deleted_at"],
+            "deleted_by": uid,
+            "group_id": recalled["group_id"],
+            "room_id": (
+                "G{}".format(recalled["group_id"])
+                if recalled["group_id"] is not None
+                else None
+            ),
+        }
+        if recalled["group_id"] is not None:
+            recipients = group_cursor.get_member_uids(recalled["group_id"])
+        else:
+            recipients = {recalled["sender_uid"], recalled["receiver_uid"]}
+            for recipient in recipients:
+                other_uid = (recalled["receiver_uid"]
+                             if recipient == recalled["sender_uid"]
+                             else recalled["sender_uid"])
+                direct_event = dict(event)
+                direct_event["room_id"] = "U{}".format(other_uid)
+                instant_contact.notify_user(recipient, direct_event)
+            recipients = []
+        for recipient in recipients:
+            instant_contact.notify_user(recipient, event)
+        return json.dumps({
+            "success": True,
+            "message": recalled,
+        }, ensure_ascii=False)
+
+    @api("/message/recalled_original", methods=['POST'])
+    def recalled_message_original(req):
+        try:
+            uid = int(req["uid"])
+            password = req["password"]
+            mid = int(req["mid"])
+        except (KeyError, TypeError, ValueError):
+            return json.dumps({"success": False, "error": "invalid_request"})
+        if verify_root(uid, password) is None:
+            return json.dumps({"success": False, "error": "forbidden"})
+        message = messages_cursor.get_message(mid, include_recalled_original=True)
+        if message is None or not message["deleted"]:
+            return json.dumps({"success": False, "error": "not_found"})
+        message["quote_preview"] = (
+            messages_cursor.get_quote_preview(message["quote"], message)
+            if message["quote"] >= 0 else None
+        )
+        if message.get("file_hash"):
+            message["file"] = with_display_file_name(
+                file_metadata(message["file_hash"], message["sender_uid"]),
+                message.get("file_name"),
+            )
+        return json.dumps({"success": True, "message": message}, ensure_ascii=False)
+
     @api("/message/history", methods=['POST'])
     def message_history(req):
         """获取历史消息"""
@@ -2658,7 +3012,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
         rows = messages_cursor.query_history(uid, target_uid,
             before_mid=before_mid, limit=limit, group_id=group_id)
-        return json.dumps(messages_cursor.serialize_rows(rows), ensure_ascii=False)
+        records = messages_cursor.serialize_rows(rows)
+        return json.dumps(enrich_message_files(records), ensure_ascii=False)
 
     @api("/friend/add_friend", methods=['POST'])
     def add_friend(req):
