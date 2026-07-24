@@ -7,8 +7,9 @@ TFV5 的文件存储系统基于哈希去重和用户配额管理。同一文件
 ## 概念说明
 
 - 哈希：上传时对文件内容计算 SHA256，相同内容的文件共享同一物理存储。
-- 引用计数 (`ref_count`)：文件被引用次数（论坛帖子、聊天消息等场景中的引用）。
-- 上传用户计数 (`upload_user_count`)：拥有该文件的用户数。降为 0 时文件立即从服务器移除。
+- 引用计数 (`ref_count`)：文件的总保留引用数，包括有效的用户所有权引用，以及聊天消息、论坛帖子等内容引用。
+- 上传用户计数 (`upload_user_count`)：拥有该文件有效所有权的用户数，仅统计所有权，不包含聊天或论坛内容引用。用户主动删除所有权时，仍有内容引用的文件会被保留。
+- 初始上传者 (`sender`)：首次将该哈希登记到服务器的用户。后续其他用户上传相同内容时共享物理文件，但不会改变 `sender`。
 - 存储配额 (`user_storage_quota`)：每个用户的存储空间上限，单位为字节。`-1` 表示不限。
 
 ## 公开 API
@@ -25,12 +26,16 @@ TFV5 的文件存储系统基于哈希去重和用户配额管理。同一文件
 {
     "sender" : <sender_uid>,
     "file_name" : <file_name>,
+    "filename" : <file_name>,
     "send_time" : <send_time>,
     "hash" : <hash>,
     "ref_count" : <ref_count>,
     "last_ref_time" : <last_ref_time>,
     "size" : <size>,
-    "upload_user_count" : <upload_user_count>
+    "mime_type" : <mime_type>,
+    "extension" : <extension>,
+    "upload_user_count" : <upload_user_count>,
+    "download_url" : "/file/get_file/<hash>"
 }
 ```
 
@@ -61,7 +66,17 @@ TFV5 的文件存储系统基于哈希去重和用户配额管理。同一文件
     "result" : "<timestamp>True",
     "hash" : <hash>,
     "download_url" : "/file/get_file/<hash>",
-    "info_url" : "/file/get_file_info/<hash>"
+    "info_url" : "/file/get_file_info/<hash>",
+    "file" : {
+        "hash" : <hash>,
+        "file_name" : <file_name>,
+        "filename" : <file_name>,
+        "size" : <size>,
+        "mime_type" : <mime_type>,
+        "extension" : <extension>,
+        "download_url" : "/file/get_file/<hash>",
+        "send_time" : <send_time>
+    }
 }
 ```
 
@@ -87,7 +102,10 @@ TFV5 的文件存储系统基于哈希去重和用户配额管理。同一文件
         "upload_time" : <upload_time>,
         "size" : <size>,
         "ref_count" : <ref_count>,
-        "upload_user_count" : <upload_user_count>
+        "upload_user_count" : <upload_user_count>,
+        "mime_type" : <mime_type>,
+        "extension" : <extension>,
+        "download_url" : "/file/get_file/<hash>"
     }
 ]
 ```
@@ -126,8 +144,20 @@ TFV5 的文件存储系统基于哈希去重和用户配额管理。同一文件
 
 删除行为：
 - 将用户与该文件的关联标记为无效（不再计入存储额度）
-- 减少该文件的 `upload_user_count`
-- 若 `upload_user_count` 降为 0，文件立即从服务器磁盘移除
+- 移除一条有效所有权引用，同时减少该文件的 `upload_user_count` 和 `ref_count`
+- 若 `upload_user_count` 和 `ref_count` 均降为 0，文件可从服务器磁盘移除
+- 聊天消息或论坛帖子仍引用文件时，即使用户删除个人所有权，物理文件仍会保留
+- 若删除者是该哈希的初始上传者，已有消息和附件引用仍可保留物理文件，但不能再从消息创建新的文件转发；其他用户即使仍拥有相同哈希，也不会取代初始上传者身份
+
+### 消息文件转发约束
+
+文件消息转发由消息接口处理，参见[消息文档](message.md)。服务端不会把转发者登记为文件上传者，也不会绕过普通文件发送的所有权检查：
+
+- 普通发送文件时，发送者必须在 `user_file` 中拥有该哈希的有效记录。
+- 转发已有文件消息时，服务端根据来源消息读取文件哈希，并检查 `file.sender` 对应初始上传者的 `user_file` 记录仍为有效状态。
+- 初始上传者删除文件后，新的转发请求失败，即使其他用户仍拥有相同哈希。
+- 校验初始上传者状态和增加 `ref_count` 在同一个数据库锁与事务中完成。
+- 已经发送或转发成功的历史消息引用不会因为初始上传者随后删除个人所有权而立即移除；只禁止创建新的转发引用。
 
 ### 减少引用
 
@@ -176,7 +206,10 @@ TFV5 的文件存储系统基于哈希去重和用户配额管理。同一文件
         "size" : <size>,
         "ref_count" : <ref_count>,
         "upload_user_count" : <upload_user_count>,
-        "sender" : <original_sender_uid>
+        "sender" : <original_sender_uid>,
+        "mime_type" : <mime_type>,
+        "extension" : <extension>,
+        "download_url" : "/file/get_file/<hash>"
     }
 ]
 ```
@@ -216,5 +249,9 @@ TFV5 的文件存储系统基于哈希去重和用户配额管理。同一文件
 
 两种情况下文件会被清理：
 
-1. **上传用户数为 0**：当文件不再被任何用户拥有时，立即从服务器删除（即使引用计数仍大于 0）。
-2. **引用计数为 0 且超时**：当文件无引用且超过 `file_last_time` 小时，从服务器删除，并将其关联的用户文件标记为无效。
+1. **无拥有者且无引用**：当 `upload_user_count = 0` 且 `ref_count = 0` 时，文件可立即从服务器删除。
+2. **总保留引用计数为 0 且超时**：当 `ref_count = 0` 且超过 `file_last_time` 小时，服务端可清理文件，并将仍残留的关联用户文件标记为无效。
+
+消息撤回不会减少文件引用，因为 root 仍可查看撤回记录。帖子删除、用户内容清理等真正移除引用关系的操作才会减少对应引用计数。管理员强制删除是例外，会忽略所有引用。
+
+服务器启动时会根据有效用户所有权、聊天消息和论坛附件重新校准 `upload_user_count` 与 `ref_count`，以兼容旧版数据库并防止历史附件被误清理。

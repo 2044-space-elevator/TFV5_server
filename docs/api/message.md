@@ -4,10 +4,10 @@
 
 TFV5 的消息系统由两部分组成：
 
-1. **REST API**：发送消息、查询聊天列表、拉取历史消息。
+1. **REST API**：发送、回复、转发、撤回消息，查询聊天列表和拉取历史消息。
 2. **WebSocket 实时推送**：发送和接收即时消息、输入状态提示。
 
-消息在服务端持久化存储，通过 `mid`（消息ID）唯一标识。客户端可通过 `client_mid` 实现去重和发送确认。
+消息在服务端持久化存储，通过 `mid`（消息ID）唯一标识。客户端可通过 `client_mid` 实现去重和发送确认。WebSocket 发送时 `client_mid` 可选，但服务端仅在其非 `null` 时发送 ACK。
 
 ---
 
@@ -25,9 +25,16 @@ TFV5 的消息系统由两部分组成：
     "content" : <content>,
     "content_type" : "plain" | "file",
     "file_hash" : <file_hash>,
+    "file_name" : <file_name_or_null>,
     "send_time" : <send_time>,
     "quote" : <quote_mid>,
+    "forwarded" : <forwarded_mid>,
     "deleted" : 0 | 1,
+    "deleted_at" : <deleted_at>,
+    "deleted_by" : <deleted_by_uid>,
+    "quote_preview" : <quote_preview_or_null>,
+    "forward_preview" : <forward_preview_or_null>,
+    "file" : <file_metadata_or_null>,
     "mentioned_uids" : [<uid>, ...]
 }
 ```
@@ -36,7 +43,14 @@ TFV5 的消息系统由两部分组成：
 - `<client_mid>`：客户端生成的去重标识（可选）。同一 `client_mid` 的消息不会重复存储。
 - `<content_type>`：`"plain"` 表示文本消息，`"file"` 表示文件消息。
 - `<file_hash>`：文件消息的取件码（参见[文件文档](file.md)）。
-- `<quote>`：引用的消息 `mid`，`-1` 表示不引用。
+- `<file_name>`：文件消息发送时固化的展示名称，用于发送者后来删除个人文件所有权后仍能正确展示历史消息。
+- `<quote>`：回复（引用）的消息 `mid`，`-1` 表示不回复其他消息。被回复消息必须属于同一私聊或群聊，且不能已经被撤回。
+- `<quote_preview>`：被回复消息的摘要，包含 `mid`、`sender_uid`、`content_type`、最多 240 字符的 `content`、`file_hash`、`deleted` 和 `deleted_at`。目标不存在或不属于同一会话时为 `null`。
+- `<forwarded>`：转发来源消息的 `mid`，`-1` 表示不是转发消息。转发来源必须属于同一私聊或群聊，且不能已经被撤回。
+- `<forward_preview>`：转发来源摘要，结构与 `quote_preview` 相同。目标不存在或不属于同一会话时为 `null`。
+- `<file>`：文件消息的元数据，包含 `hash`、`file_name`、`filename`、`size`、`mime_type`、`extension`、`download_url` 和 `send_time`。非文件消息通常不包含该字段；若发送者后来删除了自己的文件所有权，按发送者查询的 `file_name` 和 `filename` 可能为 `null`。
+- `<deleted_at>`、`<deleted_by_uid>`：撤回时间和执行撤回的用户 uid。未撤回时为 `null`。
+- 当 `deleted = 1` 时，普通接口仍返回该消息作为撤回占位，但 `content` 和 `file_hash` 固定为 `null`。服务端不会从数据库中移除原始内容。
 - `<mentioned_uids>`：消息正文中通过 `@用户名` 提及的用户 uid 列表。仅在 `content_type` 为 `"plain"` 时有值。
 - `<room_id>`：聊天室标识，格式为 `"U<uid>"` 或 `"G<gid>"`。
 
@@ -54,6 +68,9 @@ TFV5 的消息系统由两部分组成：
     "last_time" : <last_time>,
     "last_sender_uid" : <last_sender_uid>,
     "last_mid" : <last_mid>,
+    "last_deleted" : <true_or_false>,
+    "last_deleted_at" : <deleted_at>,
+    "last_file" : <file_metadata_or_null>,
     "is_friend" : <true_or_false>,
     "is_pinned" : <true_or_false>,
     "notify_level" : <0_or_1_or_2>
@@ -63,6 +80,8 @@ TFV5 的消息系统由两部分组成：
 - `is_friend`：`room_type = "direct"` 时表示当前是否仍为好友关系。
 - `is_pinned`：当前用户是否将此聊天室置顶。
 - `notify_level`：当前用户对此聊天室的通知级别。`0` = 全部通知，`1` = 仅 @提及，`2` = 静音。首次访问或未设置时返回 `null`。
+- `last_deleted`：最后一条消息是否已撤回。为 `true` 时 `last_content` 为 `null`。
+- `last_file`：最后一条未撤回消息为文件消息时的文件元数据，否则为 `null`。
 
 ---
 
@@ -139,6 +158,7 @@ TFV5 的消息系统由两部分组成：
     "content_type" : <content_type>,
     "client_mid" : <client_mid>,
     "quote" : <quote_mid>,
+    "forwarded" : <forwarded_mid>,
     "file_hash" : <file_hash>
 }
 ```
@@ -148,16 +168,34 @@ TFV5 的消息系统由两部分组成：
 - `<content>`（必填）是消息正文。文本消息传文本内容，文件消息传文件哈希。
 - `<content_type>`（可选，默认 `"plain"`）消息类型：`"plain"` 或 `"file"`。
 - `<client_mid>`（可选）客户端去重标识。重复提交相同 `client_mid` 不会创建新消息，直接返回已有 `mid`。
-- `<quote>`（可选，默认 `-1`）引用的消息 `mid`。
+- `<quote>`（可选，默认 `-1`）要回复的消息 `mid`。
+- `<forwarded>`（可选，默认 `-1`）要转发的消息 `mid`。`quote` 和 `forwarded` 不能同时大于等于 `0`。
 - `<file_hash>`（可选，`content_type = "file"` 时必填）文件的取件码。
+
+当 `forwarded >= 0` 时，服务端以转发来源消息为准读取 `content`、`content_type`、`file_hash` 和 `file_name`，不会信任客户端提交的消息正文或文件哈希。当前接口只支持在来源消息所属的同一会话内转发。
 
 校验：
 - 操作者必须与接收方为好友关系（私聊），或为该群成员（群聊）。
 - `content_type` 仅允许为 `"plain"` 或 `"file"`，否则请求将被拒绝。
 - 文本消息长度不得超过 `max_message_length` 配置（默认 10000 字符）。
 - 当 `content_type = "file"` 时，`file_hash` 必须为 64 位十六进制字符串（SHA-256 格式），否则请求将被拒绝。
+- 文件必须存在，并且发送者必须拥有有效的该文件记录。
+- `quote` 指向的消息必须存在、未撤回并属于目标会话。
+- `forwarded` 指向的消息必须存在、未撤回并属于目标会话。
+- 转发文件消息时，不要求转发者成为文件上传者，但该哈希的**初始上传者**必须仍保有有效文件所有权；初始上传者删除文件后，新的文件转发会失败。详见[文件文档](file.md)。
 
-返回：成功返回 `{"mid": <mid>, "client_mid": <client_mid>, "status": "sent"}`。重复提交也返回此格式（`mid` 为已有消息ID）。失败返回时间戳加 `False`。
+返回：成功返回以下对象。重复提交也返回相同格式，其中 `mid` 为已有消息 ID。
+
+```json
+{
+    "mid" : <mid>,
+    "client_mid" : <client_mid>,
+    "status" : "sent",
+    "message" : <message_object>
+}
+```
+
+失败返回时间戳加 `False`。
 
 
 ### 聊天列表
@@ -187,7 +225,12 @@ TFV5 的消息系统由两部分组成：
         "last_time" : <last_time>,
         "last_sender_uid" : <last_sender_uid>,
         "last_mid" : <last_mid>,
-        "is_friend" : <true_or_false>
+        "last_deleted" : <true_or_false>,
+        "last_deleted_at" : <deleted_at>,
+        "last_file" : <file_metadata_or_null>,
+        "is_friend" : <true_or_false>,
+        "is_pinned" : <true_or_false>,
+        "notify_level" : <0_or_1_or_2>
     }
 ]
 ```
@@ -219,7 +262,7 @@ TFV5 的消息系统由两部分组成：
 其中：
 - `<target_uid>`（私聊时必填）对方用户 uid。
 - `<group_id>`（群聊时必填）群 gid。
-- `target_uid` 和 `group_id` 二选一，不可同时使用。
+- `target_uid` 和 `group_id` 通常二选一；若同时传入，当前实现优先按 `group_id` 查询群聊历史。
 - `<before_mid>`（可选，默认 `0` 即从最新开始）翻页游标，传上次返回结果中最小的 `mid`。
 - `<limit>`（可选，默认 `50`，上限 `200`）每次拉取条数。
 
@@ -238,13 +281,109 @@ TFV5 的消息系统由两部分组成：
         "file_hash" : <file_hash>,
         "send_time" : <send_time>,
         "quote" : <quote_mid>,
+        "forwarded" : <forwarded_mid>,
         "deleted" : 0 | 1,
+        "deleted_at" : <deleted_at>,
+        "deleted_by" : <deleted_by_uid>,
+        "quote_preview" : <quote_preview_or_null>,
+        "forward_preview" : <forward_preview_or_null>,
+        "file" : <file_metadata_or_null>,
         "mentioned_uids" : [<uid>, ...]
     }
 ]
 ```
 
-消息按 `mid` 降序排列（最新在前）。
+消息按 `mid` 降序排列（最新在前）。已撤回消息不会被过滤，而是按照“消息对象”一节中的脱敏规则返回占位。`quote_preview` 和 `forward_preview` 分别给出回复目标与转发来源摘要。
+
+---
+
+### 撤回消息
+
+- `^ POST /message/recall` 撤回一条消息。
+
+请求体：
+
+```json
+{
+    "mid" : <mid>
+}
+```
+
+权限规则：
+
+- 用户可以撤回自己发送的消息。
+- 群主和群管理员可以撤回本群任意消息。
+- 服务器 `admin` 和 `root` 可以撤回任意私聊或群聊消息。
+
+成功返回：
+
+```json
+{
+    "success" : true,
+    "message" : {
+        "mid" : <mid>,
+        "client_mid" : <client_mid_or_null>,
+        "sender_uid" : <sender_uid>,
+        "receiver_uid" : <receiver_uid>,
+        "group_id" : <group_id_or_null>,
+        "content" : null,
+        "content_type" : "plain" | "file",
+        "file_hash" : null,
+        "file_name" : <file_name_or_null>,
+        "send_time" : <send_time>,
+        "quote" : <quote_mid>,
+        "deleted" : 1,
+        "deleted_at" : <deleted_at>,
+        "deleted_by" : <deleted_by_uid>
+    }
+}
+```
+
+这里的 `message` 是脱敏后的原始消息记录，不包含 `quote_preview`、`file` 或 `mentioned_uids`。
+
+失败返回 `success = false`，`error` 为 `invalid_request`、`auth_failed`、`not_found`、`forbidden` 或 `already_recalled`。
+
+撤回是软删除：原始正文和文件哈希仍保留在数据库中；普通历史、聊天列表、回复摘要和实时事件只能看到脱敏后的撤回占位。撤回文件消息不会减少文件引用计数。
+
+### 查看被撤回消息原文（Root）
+
+- `^ POST /message/recalled_original` 查看一条被撤回消息的原始记录。
+
+请求体：
+
+```json
+{
+    "mid" : <mid>
+}
+```
+
+仅服务器 `root` 可以访问。成功返回：
+
+```json
+{
+    "success" : true,
+    "message" : {
+        "mid" : <mid>,
+        "client_mid" : <client_mid_or_null>,
+        "sender_uid" : <sender_uid>,
+        "receiver_uid" : <receiver_uid>,
+        "group_id" : <group_id_or_null>,
+        "content" : <original_content>,
+        "content_type" : "plain" | "file",
+        "file_hash" : <original_file_hash_or_null>,
+        "file_name" : <file_name_or_null>,
+        "send_time" : <send_time>,
+        "quote" : <quote_mid>,
+        "deleted" : 1,
+        "deleted_at" : <deleted_at>,
+        "deleted_by" : <deleted_by_uid>,
+        "quote_preview" : <quote_preview_or_null>,
+        "file" : <file_metadata>
+    }
+}
+```
+
+`quote_preview` 始终存在，无引用时为 `null`；`file` 仅在原消息有 `file_hash` 时存在。该接口不返回 `mentioned_uids`。目标不存在或未被撤回时返回 `not_found`，非 root 返回 `forbidden`。
 
 ---
 
@@ -257,7 +396,7 @@ TFV5 的消息系统由两部分组成：
 ### 通用约定
 
 - 所有 WebSocket 消息（除心跳外）均经过 AES 加密，封装格式同 [secret 类型 API](main.md#对于-secret-类型)。
-- 每条消息可携带 `client_mid`（客户端生成的唯一标识），用于去重和发送确认。
+- 每条消息可携带 `client_mid`（客户端生成的唯一标识），用于去重和发送确认。该字段可选；服务端仅在 `client_mid` 非 `null` 时发送成功或失败 ACK。
 - 服务端对每个用户默认实施 **每秒 10 条**消息的限流。超出限制时返回 `message.ack` 带 `"rate_limited"` 错误。
 
 ---
@@ -332,7 +471,7 @@ TFV5 的消息系统由两部分组成：
 
 ### 发送确认（ACK）
 
-服务端收到消息后，会立即返回 ACK 确认包：
+当发送请求中的 `client_mid` 非 `null` 时，服务端处理消息后返回 ACK 确认包。省略 `client_mid` 或传入 `null` 时仍可发送消息，但服务端不会发送成功或失败 ACK：
 
 ```json
 {
@@ -350,7 +489,7 @@ TFV5 的消息系统由两部分组成：
     "type" : "message.ack",
     "client_mid" : <client_mid>,
     "status" : "failed",
-    "error" : "not_friends" | "not_group_member" | "rate_limited" | "message_too_long" | "invalid_quote" | "invalid_target" | "group_not_found" | "banned"
+    "error" : "not_friends" | "not_group_member" | "rate_limited" | "message_too_long" | "invalid_quote" | "invalid_target" | "invalid_file_hash" | "file_not_owned" | "group_not_found" | "banned"
 }
 ```
 
@@ -361,8 +500,13 @@ TFV5 的消息系统由两部分组成：
 - `message_too_long` — 文本超过 `max_message_length`
 - `invalid_quote` — 引用消息 ID 非法
 - `invalid_target` — 接收方格式非法
+- `invalid_file_hash` — 文件哈希不是 64 位十六进制字符串
+- `file_not_owned` — 文件不存在或发送者没有有效的文件所有权
+- `client_mid_conflict` — 当前 `client_mid` 已用于另一条目标、正文、类型或回复关系不同的消息
 - `group_not_found` — 群不存在
 - `banned` — 账号已被封禁
+
+`invalid_target` 适用于结构完整但前缀无效的目标。WebSocket 请求缺少 `send_to`、传入空字符串或无法转换的编号时，当前实现可能直接关闭连接而不返回 ACK；客户端应在发送前校验目标格式。
 
 ---
 
@@ -383,6 +527,9 @@ TFV5 的消息系统由两部分组成：
     "client_mid" : <client_mid>,
     "room_id" : "<room_id>",
     "group_id" : <group_id>,
+    "quote_preview" : <quote_preview_or_null>,
+    "forwarded" : <forwarded_mid>,
+    "forward_preview" : <forward_preview_or_null>,
     "mentioned_uids" : [<uid>, ...],
     "mentions_me" : <true_or_false>,
     "should_alert" : <true_or_false>
@@ -403,6 +550,10 @@ TFV5 的消息系统由两部分组成：
     "client_mid" : <client_mid>,
     "room_id" : "<room_id>",
     "group_id" : <group_id>,
+    "quote_preview" : <quote_preview_or_null>,
+    "forwarded" : <forwarded_mid>,
+    "forward_preview" : <forward_preview_or_null>,
+    "file" : <file_metadata>,
     "mentioned_uids" : [],
     "mentions_me" : false,
     "should_alert" : <true_or_false>
@@ -416,9 +567,33 @@ TFV5 的消息系统由两部分组成：
 - `<group_id>`：群聊时存在，为群 gid。私聊时无此字段。
 - `<sender_id>`：私聊为 `"U<uid>"`，群聊为 `"G<gid>U<uid>"`。
 - `<meta>`：引用的消息 `mid`。
-- `<mentioned_uids>`：消息中被 @提及的用户 uid 列表。文件消息固定为空数组。
+- `<quote_preview>`：回复目标摘要，结构与 REST 消息对象一致。
+- `<forwarded>`、`<forward_preview>`：转发来源消息 ID 与摘要；非转发消息分别为 `-1` 和 `null`。
+- `<file>`：文件消息的元数据。
+- `<mentioned_uids>`：消息中完整的、经服务端解析出的 @提及用户 uid 列表；发送方收到的副本也保留此列表。文件消息固定为空数组。
 - `<mentions_me>`：当前接收用户是否在被提及列表中。发送方收到的推送中固定为 `false`。
 - `<should_alert>`：客户端是否应触发通知提醒。由用户的聊天室偏好（`notify_level`）和被提及状态共同决定。发送方收到的推送中固定为 `false`。
+
+### 消息撤回推送
+
+消息撤回后，会向会话内在线用户发送 `NOTIFICATION.NEW`，其 `notification.info` 为：
+
+```json
+{
+    "event" : "message.recalled",
+    "title" : "<deleted_at>",
+    "content" : null,
+    "sender" : <operator_uid>,
+    "mid" : <mid>,
+    "deleted" : true,
+    "deleted_at" : <deleted_at>,
+    "deleted_by" : <operator_uid>,
+    "room_id" : <room_id>,
+    "group_id" : <group_id_or_null>
+}
+```
+
+该事件不包含被撤回消息的原始正文或文件哈希。客户端应将对应本地消息改为撤回占位，并清除引用该消息的缓存摘要。
 
 ### 输入状态
 

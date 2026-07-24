@@ -96,6 +96,43 @@ CREATE TABLE IF NOT EXISTS notifications (
         )
         return ts
 
+    def redact_recalled_message(self, mid : int):
+        """删除消息内容，保留引用预览"""
+        with self.lock:
+            def operation():
+                self.cursor.execute(
+                    "SELECT id, info FROM notifications WHERE info LIKE ? OR info LIKE ?",
+                    ('%"mid": {}%'.format(int(mid)),
+                     '%"mid":{}%'.format(int(mid))),
+                )
+                updates = []
+                for notification_id, raw_info in self.cursor.fetchall():
+                    event = self._deserialize_event(raw_info)
+                    changed = False
+                    if (event.get("event") in {"message.plain", "message.file"}
+                            and event.get("mid") == int(mid)):
+                        event["content"] = None
+                        event.pop("file_hash", None)
+                        event.pop("file", None)
+                        event["deleted"] = True
+                        changed = True
+                    preview = event.get("quote_preview")
+                    if isinstance(preview, dict) and preview.get("mid") == int(mid):
+                        preview["content"] = None
+                        preview["file_hash"] = None
+                        preview.pop("file", None)
+                        preview["deleted"] = True
+                        changed = True
+                    if changed:
+                        updates.append((self._serialize_event(event), notification_id))
+                if updates:
+                    self.cursor.executemany(
+                        "UPDATE notifications SET info = ? WHERE id = ?", updates)
+                self.conn.commit()
+                return len(updates)
+
+            return self._execute_with_retry(operation)
+
     def query_events_after(self, uid: int, time_stamp):
         uid = int(uid)
         return self.query(

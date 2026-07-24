@@ -4,6 +4,10 @@ import base64
 import time
 from db import FileDb
 import hashlib
+import mimetypes
+import threading
+
+_upload_lock = threading.Lock()
 
 def sha256(data : str | bytes) -> str:
     if isinstance(data, str):
@@ -28,34 +32,35 @@ def upload_file(port_api : int, uid : int, file_b64 : str, file_name : str, file
     content = base64.b64decode(file_b64)
     file_size = len(content)
     hashes = sha256(content)
+    mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+    extension = os.path.splitext(file_name)[1].lower()
 
-    already_owned = file_cursor.has_active_user_file(uid, hashes)
-
-    if file_cursor.file_exists(hashes):
-        if not already_owned:
-            file_cursor.increment_ref(hashes)
-            file_cursor.increment_upload_user_count(hashes)
-    else:
-        disk_path = file_path(port_api, hashes)
+    disk_path = file_path(port_api, hashes)
+    with _upload_lock:
+        wrote_blob = False
         try:
-            with open(disk_path, "wb") as file:
-                file.write(content)
-        except Exception:
-            raise
-        try:
-            # 并发修复
-            file_cursor.tag_file(uid, file_name, time.time(), hashes, file_size)
-        except Exception:
-            if os.path.isfile(disk_path):
-                os.remove(disk_path)
-            raise
+            registered = file_cursor.file_exists(hashes)
+            if not registered or not os.path.isfile(disk_path):
+                with open(disk_path, "wb") as file:
+                    wrote_blob = True
+                    file.write(content)
 
-    try:
-        file_cursor.add_user_file(uid, hashes, file_name, time.time())
-    except Exception:
-        if not already_owned and file_cursor.file_exists(hashes):
-            file_cursor.decrement_ref(hashes)
-        raise
+            file_cursor.register_upload(
+                uid, hashes, file_name, time.time(), file_size,
+                mime_type=mime_type, extension=extension,
+            )
+        except Exception:
+            if wrote_blob:
+                try:
+                    registered = file_cursor.file_exists(hashes)
+                except Exception:
+                    registered = True
+                if not registered and os.path.isfile(disk_path):
+                    try:
+                        os.remove(disk_path)
+                    except OSError:
+                        pass
+            raise
 
     qry = file_cursor.lose_effect(file_last_time)
     for tmp in qry:
@@ -91,6 +96,18 @@ def clean_user_files(port_api : int, uid : int, file_cursor : FileDb):
         if os.path.isfile(target_path):
             os.remove(target_path)
     return rows
+
+
+def release_references(port_api : int, hashes, file_cursor : FileDb,
+                       file_last_time : float = 72.0):
+    for file_hash in hashes:
+        file_cursor.decrement_ref(file_hash)
+    deleted = file_cursor.lose_effect(file_last_time)
+    for row in deleted:
+        target_path = file_path(port_api, row[3])
+        if os.path.isfile(target_path):
+            os.remove(target_path)
+    return deleted
 
 def force_delete_file(port_api : int, hashes : str, file_cursor : FileDb):
     file_cursor.force_delete_file(hashes)
