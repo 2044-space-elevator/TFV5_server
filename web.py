@@ -1107,6 +1107,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         password = req["password"]
         forum_name = req["forum_name"]
         introduction = req["introduction"]
+        request_id = req.get("request_id")
         if not user_cursor.verify_user(uid, password):
             return bool_res()[False]
         user_row = get_user_row(uid)
@@ -1118,6 +1119,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         with locks['queue']:
             with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
                 queue = json.load(file)
+            if isinstance(request_id, str) and request_id:
+                duplicate = any(
+                    isinstance(entry, dict) and
+                    entry.get("creater") == uid and
+                    entry.get("request_id") == request_id
+                    for key, entry in queue.items() if str(key).isdigit()
+                )
+                if duplicate:
+                    return bool_res()[True]
             qid = queue['queue_num'] + 1
             queue["queue_num"] = qid
             for i in queue.keys():
@@ -1126,7 +1136,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             queue[qid] = {
                 "creater" : uid,
                 "forumname" : forum_name,
-                "introduction" : introduction
+                "introduction" : introduction,
+                "request_id" : request_id
             } 
             with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
                 json.dump(queue, file)
@@ -1430,7 +1441,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if user_row is None:
             return bool_res()[False]
         user_stat = user_row[4]
-        if not (user_stat in ["admin", "root"] or uid == creater or uid == creater_post):
+        forum_role = forum_cursor.get_member_role(fid, uid)
+        if not (user_stat in ["admin", "root"] or uid == creater_post or
+                (forum_role is not None and forum_role >= 50)):
             return bool_res()[False]
         attachment_hashes = forum_cursor.delete_post(fid, pid)
         file.release_references(
@@ -1678,6 +1691,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if user_row is None:
             return bool_res()[False]
         user_stat = user_row[4]
+        forum_role = forum_cursor.get_member_role(fid, uid)
 
         removed_creator = [None]
         def remove_comment_entry(comments):
@@ -1685,7 +1699,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if thread is None or time_stamp not in thread:
                 return False
             creater = thread[time_stamp][0]
-            if not (creater == uid or user_stat in ['admin', 'root']):
+            if not (creater == uid or user_stat in ['admin', 'root'] or
+                    (forum_role is not None and forum_role >= 50)):
                 return False
             removed_creator[0] = creater
             del thread[time_stamp]
@@ -2177,6 +2192,14 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if group_cursor.is_admin(gid, uid) == 2:
             return bool_res()[False]
         succeeded = group_cursor.remove_member(gid, uid)
+        if succeeded:
+            run_notification_side_effect(
+                "group.left",
+                lambda: notify_user(
+                    uid, "group.left", "已退出群聊", "你已退出群聊。",
+                    sender=uid, meta={"gid": gid}
+                )
+            )
         return bool_res()[succeeded]
 
     @api("/group/remove_admin", methods=['POST'])

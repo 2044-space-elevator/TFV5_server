@@ -369,6 +369,7 @@ TFV5 群聊系统支持创建群组、成员管理、管理员管理、入群审
 - `group.admin.removed` — 管理员权限被移除
 - `group.member.removed` — 被移出群聊
 - `group.deleted` — 群聊被解散
+- `group.left` — 当前账户在另一会话主动退出群聊
 - `group.owner.transferred` — 被转让为群主
 - `group.join.request` — 收到新的入群申请（发送给群主）
 - `group.join.approved` — 入群申请被通过（发送给申请人）
