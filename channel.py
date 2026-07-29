@@ -10,7 +10,6 @@ import base64
 import os
 import threading
 import logging
-import mimetypes
 from collections import defaultdict
 from mention_utils import resolve_mentioned_uids, should_alert
 
@@ -30,7 +29,8 @@ def _metadata_with_name(metadata, file_name):
     result = dict(metadata)
     result["file_name"] = file_name
     result["filename"] = file_name
-    result["mime_type"] = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+    result.pop("mime_type", None)
+    result["file_type"] = result.get("file_type") or "unknown"
     result["extension"] = os.path.splitext(file_name)[1].lower()
     return result
 
@@ -128,7 +128,7 @@ class InstantConnect():
             elif websocket in self.connected_clients[-1]:
                 self.connected_clients[-1].remove(websocket)
             self.send_queue.pop(websocket, None)
-        self.aes_key.pop(websocket, None)
+            self.aes_key.pop(websocket, None)
 
     async def _queue_message(self, websocket, message : dict):
         queue = self.send_queue.get(websocket)
@@ -271,9 +271,15 @@ class InstantConnect():
                         continue
                 if message['type'] == "message.plain":
                     content = message['content']
-                    plain = content['plain']
-                    send_to = content['send_to']
-                    quote = content['quote']
+                    if not isinstance(content, dict):
+                        self._queue_ack(websocket, message.get('client_mid'), status="failed", error="invalid_request")
+                        continue
+                    plain = content.get('plain', '')
+                    send_to = content.get('send_to', '')
+                    if not isinstance(send_to, str) or len(send_to) < 2:
+                        self._queue_ack(websocket, message.get('client_mid'), status="failed", error="invalid_target")
+                        continue
+                    quote = int(content.get('quote', -1))
                     client_mid = message.get('client_mid')
                     if quote < -1:
                         self._queue_ack(websocket, client_mid, status="failed", error="invalid_quote")
@@ -411,9 +417,16 @@ class InstantConnect():
 
                 elif message["type"] == "message.file":
                     content = message['content']
-                    file_hashes = content['file_hashes']
-                    send_to = content['send_to']
-                    quote = content['quote']
+                    if not isinstance(content, dict):
+                        self._queue_ack(websocket, message.get('client_mid'), status="failed", error="invalid_request")
+                        continue
+                    file_hashes = content.get('file_hashes')
+                    send_to = content.get('send_to')
+                    try:
+                        quote = int(content.get('quote', -1))
+                    except (TypeError, ValueError):
+                        self._queue_ack(websocket, message.get('client_mid'), status="failed", error="invalid_quote")
+                        continue
                     client_mid = message.get('client_mid')
                     if quote < -1:
                         self._queue_ack(websocket, client_mid, status="failed", error="invalid_quote")
@@ -425,9 +438,16 @@ class InstantConnect():
                     if not isinstance(file_hashes, str) or len(file_hashes) != 64 or not all(c in '0123456789abcdefABCDEF' for c in file_hashes):
                         self._queue_ack(websocket, client_mid, status="failed", error="invalid_file_hash")
                         continue
+                    if not isinstance(send_to, str) or len(send_to) < 2:
+                        self._queue_ack(websocket, client_mid, status="failed", error="invalid_target")
+                        continue
                     if send_to[0] == 'U':
                         # 发送给用户
-                        send_to = int(send_to[1:])
+                        try:
+                            send_to = int(send_to[1:])
+                        except ValueError:
+                            self._queue_ack(websocket, client_mid, status="failed", error="invalid_target")
+                            continue
                         sender_uid = self.clients_belonged[websocket]
                         if not self.user_cursor.is_friend(sender_uid, send_to):
                             self._queue_ack(websocket, client_mid, status="failed", error="not_friends")
@@ -447,9 +467,8 @@ class InstantConnect():
                             self.file_cursor.decrement_ref(file_hashes)
                             raise
                         if msg_record.get("duplicate"):
-                            self.file_cursor.decrement_ref(file_hashes)
                             if not self.messages_cursor.request_matches(
-                                    msg_record["mid"], sender_uid, send_to, file_hashes, "file",
+                                    msg_record["mid"], sender_uid, send_to, file_hashes, content_type,
                                     file_hash=file_hashes, quote=quote):
                                 self._queue_ack(
                                     websocket, client_mid, status="failed",
@@ -458,6 +477,11 @@ class InstantConnect():
                                 continue
                             self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
                             continue
+                        if not self.file_cursor.add_reference(
+                                file_hashes, "message", msg_record["mid"], sender_uid):
+                            self.messages_cursor.recall_message(msg_record["mid"], sender_uid)
+                            self._queue_ack(websocket, client_mid, status="failed", error="file_reference_failed")
+                            continue
                         self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
                         sender_str = "U{}".format(sender_uid)
                         recv_notif = {
@@ -465,7 +489,8 @@ class InstantConnect():
                             "title" : str(msg_record["send_time"]),
                             "content" : file_hashes,
                             "sender" : sender_str,
-                            "meta" : quote,
+                            "meta" : {"quote": quote, "avatar_url": "/avatar/get_avatar/user/{}".format(sender_uid)},
+                            "quote" : quote,
                             "mid" : msg_record["mid"],
                             "file_hash" : file_hashes,
                             "client_mid" : client_mid,
@@ -491,7 +516,11 @@ class InstantConnect():
                         await self._notify_user_async(sender_uid, sender_notif)
 
                     elif send_to[0] == 'G':
-                        gid = int(send_to[1:])
+                        try:
+                            gid = int(send_to[1:])
+                        except ValueError:
+                            self._queue_ack(websocket, client_mid, status="failed", error="invalid_target")
+                            continue
                         group = self.group_cursor.query_gid(gid)
                         if not group:
                             self._queue_ack(websocket, client_mid, status="failed", error="group_not_found")
@@ -517,9 +546,8 @@ class InstantConnect():
                             self.file_cursor.decrement_ref(file_hashes)
                             raise
                         if msg_record.get("duplicate"):
-                            self.file_cursor.decrement_ref(file_hashes)
                             if not self.messages_cursor.request_matches(
-                                    msg_record["mid"], sender_uid, 0, file_hashes, "file",
+                                    msg_record["mid"], sender_uid, 0, file_hashes, content_type,
                                     file_hash=file_hashes, quote=quote, group_id=gid):
                                 self._queue_ack(
                                     websocket, client_mid, status="failed",
@@ -528,13 +556,19 @@ class InstantConnect():
                                 continue
                             self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
                             continue
+                        if not self.file_cursor.add_reference(
+                                file_hashes, "message", msg_record["mid"], sender_uid):
+                            self.messages_cursor.recall_message(msg_record["mid"], sender_uid)
+                            self._queue_ack(websocket, client_mid, status="failed", error="file_reference_failed")
+                            continue
                         self._queue_ack(websocket, client_mid, mid=msg_record["mid"], status="sent")
                         notif_dict = {
                             "event" : "message.file",
                             "title" : str(msg_record["send_time"]),
                             "content" : file_hashes,
                             "sender" : sender_str,
-                            "meta" : quote,
+                            "meta" : {"quote": quote, "avatar_url": "/avatar/get_avatar/user/{}".format(sender_uid)},
+                            "quote" : quote,
                             "mid" : msg_record["mid"],
                             "file_hash" : file_hashes,
                             "client_mid" : client_mid,

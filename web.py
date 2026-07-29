@@ -14,7 +14,8 @@ from rate_limiter import RateLimiter
 from mention_utils import resolve_mentioned_uids, should_alert
 import time
 import threading
-import mimetypes
+from datetime import datetime
+from file_types import detect_file_type, is_sticker_type
 
 def bool_res() -> tuple: 
     return (str(time.time()) + "False", str(time.time()) + "True")
@@ -28,7 +29,7 @@ def can_recall_message(operator_uid : int, operator_auth : str, message : dict,
         return operator_auth in {"admin", "root"} or group_role >= 1
     return operator_auth in {"admin", "root"}
 
-def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, forum_cursor, file_cursor, notification_cursor, messages_cursor, group_cursor, instant_contact):
+def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, forum_cursor, file_cursor, notification_cursor, messages_cursor, group_cursor, instant_contact, sticker_cursor=None):
     """
     pri 是 cryptography 库的私钥对象
     pub_pem 是二进制 pem 文件路径
@@ -56,12 +57,23 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     group_cursor._config_reader = read_config
 
     def build_notification(event : str, title : str, content : str, sender=None, meta=None):
+        if isinstance(meta, dict):
+            meta = dict(meta)
+        elif meta is not None:
+            meta = {"value": meta}
+        else:
+            meta = {}
+        if sender is not None and "pfp" not in meta and "avatar_url" not in meta:
+            raw_sender = str(sender)
+            uid = raw_sender.rsplit("U", 1)[-1] if "U" in raw_sender else raw_sender
+            if uid.isdigit():
+                meta["avatar_url"] = "/avatar/get_avatar/user/{}".format(uid)
         return {
             "event" : event,
             "title" : title,
             "content" : content,
             "sender" : sender,
-            "meta" : meta or {}
+            "meta" : meta
         }
 
     def run_side_effect(action : str, callback):
@@ -139,6 +151,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             "max_sign_length" : cfg.get("max_sign_length", 100),
             "max_introduction_length" : cfg.get("max_introduction_length", 500),
             "max_post_content_length" : cfg.get("max_post_content_length", 20000),
+            "min_username_length" : cfg.get("min_username_length", 4),
+            "min_password_length" : cfg.get("min_password_length", 1),
+            "max_sticker_packs_per_user" : cfg.get("max_sticker_packs_per_user", 24),
+            "max_stickers_per_pack" : cfg.get("max_stickers_per_pack", 24),
+            "daily_sticker_pack_creation_limit" : cfg.get("daily_sticker_pack_creation_limit", -1),
+            "max_sticker_size" : cfg.get("max_sticker_size", 1048576),
             "email_activate" : bool(cfg.get("email_activate")),
             "default_asset_urls" : {
                 "logo" : "/avatar/get_logo",
@@ -374,7 +392,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         result = dict(metadata)
         result["file_name"] = display_name
         result["filename"] = display_name
-        result["mime_type"] = mimetypes.guess_type(display_name)[0] or "application/octet-stream"
+        result.pop("mime_type", None)
+        result["file_type"] = result.get("file_type") or "unknown"
         result["extension"] = os.path.splitext(display_name)[1].lower()
         return result
 
@@ -500,13 +519,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         retain_cross_db_file_references(target_uid)
         file.clean_user_files(port_api, target_uid, file_cursor)
         group_cursor.remove_user_membership(target_uid)
-        deleted_attachment_hashes = forum_cursor.clean_user_content(
-            target_uid, return_attachment_hashes=True
+        deleted_references = forum_cursor.get_file_reference_rows(
+            cleanup_uid=target_uid
         )
-        file.release_references(
-            port_api, deleted_attachment_hashes, file_cursor,
-            read_config().get("file_last_time", 72),
-        )
+        forum_cursor.clean_user_content(target_uid)
+        for hashes, source_type, source_id, _ in deleted_references:
+            file_cursor.remove_reference(hashes, source_type, source_id)
         cleanup_forum_queue(target_uid)
         return True
 
@@ -651,6 +669,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 cfg = json.load(file)
                 is_captcha = cfg['captcha']
                 is_email_activate = cfg["email_activate"]
+        if (not isinstance(username, str) or len(username) < int(cfg.get("min_username_length", 4))
+                or not isinstance(password, str) or len(password) < int(cfg.get("min_password_length", 1))):
+            return bool_res()[False]
         
         if is_captcha:
             captcha_stamp = req["captcha_stamp"]
@@ -725,6 +746,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 return bool_res()[False]
             if not can_manage_auth(operator[4], new_auth):
                 return bool_res()[False]
+            cfg = read_config()
+            if (not isinstance(username, str) or len(username) < int(cfg.get("min_username_length", 4))
+                    or not isinstance(target_password, str) or len(target_password) < int(cfg.get("min_password_length", 1))):
+                return bool_res()[False]
 
             if not user_cursor.user_create(username, target_password, time.time(), email, stat=new_auth):
                 return bool_res()[False]
@@ -769,6 +794,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
             updates = collect_managed_updates(req, next_auth=next_auth)
             if not updates:
+                return bool_res()[False]
+            cfg = read_config()
+            if "username" in updates and (
+                    not isinstance(updates["username"], str)
+                    or len(updates["username"]) < int(cfg.get("min_username_length", 4))):
+                return bool_res()[False]
+            if "password" in updates and (
+                    not isinstance(updates["password"], str)
+                    or len(updates["password"]) < int(cfg.get("min_password_length", 1))):
                 return bool_res()[False]
 
             if not user_cursor.update_user_with_root_guard(target_uid, **updates):
@@ -1031,6 +1065,24 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if "max_post_content_length" in req:
                 updates["max_post_content_length"] = parse_int_setting(req["max_post_content_length"], minimum=1, allow_unlimited=True)
 
+            if "min_username_length" in req:
+                updates["min_username_length"] = parse_int_setting(req["min_username_length"], minimum=4)
+
+            if "min_password_length" in req:
+                updates["min_password_length"] = parse_int_setting(req["min_password_length"], minimum=1)
+
+            if "max_sticker_packs_per_user" in req:
+                updates["max_sticker_packs_per_user"] = parse_int_setting(req["max_sticker_packs_per_user"], minimum=1, allow_unlimited=True)
+
+            if "max_stickers_per_pack" in req:
+                updates["max_stickers_per_pack"] = parse_int_setting(req["max_stickers_per_pack"], minimum=1, allow_unlimited=True)
+
+            if "daily_sticker_pack_creation_limit" in req:
+                updates["daily_sticker_pack_creation_limit"] = parse_int_setting(req["daily_sticker_pack_creation_limit"], minimum=1, allow_unlimited=True)
+
+            if "max_sticker_size" in req:
+                updates["max_sticker_size"] = parse_int_setting(req["max_sticker_size"], minimum=1, allow_unlimited=True)
+
             if not updates:
                 return bool_res()[False]
 
@@ -1100,6 +1152,192 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     @app.route("/info")
     def info():
         return serialize_server_settings(read_config())
+
+    def _sticker_item_dict(row):
+        return {
+            "id": row[0], "pack_id": row[1], "slug": row[2], "name": row[3],
+            "file_hash": row[4], "file_type": row[5], "order": row[6],
+            "size": row[7], "mode": row[8], "created_at": row[9],
+        }
+
+    def _sticker_pack_dict(row, include_stickers=True):
+        data = {
+            "id": row[0], "creator_uid": row[1], "name": row[2],
+            "description": row[3], "prefix": row[4], "icon_hash": row[5],
+            "created_at": row[6], "updated_at": row[7], "usage_count": row[8],
+        }
+        if include_stickers:
+            data["stickers"] = [_sticker_item_dict(item) for item in sticker_cursor.list_stickers(row[0])]
+        return data
+
+    def _sticker_exempt(uid):
+        rows = user_cursor.uid_query(uid)
+        return bool(rows and rows[0][4] in manager_auths)
+
+    def _hash_file_type(file_hash):
+        target = file.file_path(port_api, file_hash)
+        try:
+            with open(target, "rb") as handle:
+                return detect_file_type(handle.read(), "")
+        except OSError:
+            return "unknown"
+
+    @app.route("/sticker/market")
+    def sticker_market():
+        if sticker_cursor is None:
+            return json.dumps({"items": [], "total": 0})
+        try:
+            offset = max(int(flask_request.args.get("offset", 0)), 0)
+            limit = min(max(int(flask_request.args.get("limit", 20)), 1), 50)
+        except ValueError:
+            return json.dumps({"items": [], "total": 0})
+        order = flask_request.args.get("order", "usage")
+        rows, total = sticker_cursor.list_packs(offset, limit, flask_request.args.get("query", "").strip(), order)
+        return json.dumps({"items": [_sticker_pack_dict(row) for row in rows], "total": total}, ensure_ascii=False)
+
+    @app.route("/sticker/pack/<pack_id>")
+    def sticker_pack(pack_id):
+        if sticker_cursor is None:
+            return json.dumps({"error": "unavailable"}), 404
+        row = sticker_cursor.get_pack(pack_id)
+        if row is None:
+            return json.dumps({"error": "not_found"}), 404
+        return json.dumps(_sticker_pack_dict(row), ensure_ascii=False)
+
+    @app.route("/sticker/lookup/<identifier>")
+    def sticker_lookup(identifier):
+        if sticker_cursor is None or "+" not in identifier:
+            return json.dumps({"error": "not_found"}), 404
+        prefix, slug = identifier.split("+", 1)
+        rows = sticker_cursor.query("""SELECT s.id, s.pack_id, s.slug, s.name, s.file_hash, s.file_type, s.position, s.render_size, s.render_mode, s.created_at
+                                       FROM stickers s JOIN sticker_packs p ON p.id = s.pack_id
+                                       WHERE p.prefix = ? COLLATE NOCASE AND s.slug = ? AND p.is_deleted = 0""", (prefix, slug))
+        if not rows:
+            return json.dumps({"error": "not_found"}), 404
+        return json.dumps(_sticker_item_dict(rows[0]), ensure_ascii=False)
+
+    @api("/sticker/mine", methods=["POST"])
+    def sticker_mine(req):
+        uid, password = req.get("uid"), req.get("password")
+        if sticker_cursor is None or not user_cursor.verify_user(uid, password):
+            return json.dumps({"error": "auth_failed"})
+        owned = []
+        for row in sticker_cursor.list_owned(uid):
+            pack = _sticker_pack_dict(row[2:], include_stickers=True)
+            owned.append({"pack_id": row[0], "order": row[1], "pack": pack})
+        return json.dumps(owned, ensure_ascii=False)
+
+    @api("/sticker/created", methods=["POST"])
+    def sticker_created(req):
+        uid, password = req.get("uid"), req.get("password")
+        if sticker_cursor is None or not user_cursor.verify_user(uid, password):
+            return json.dumps({"error": "auth_failed"})
+        rows, total = sticker_cursor.list_packs(0, 100, creator_uid=uid)
+        return json.dumps({"items": [_sticker_pack_dict(row) for row in rows], "total": total}, ensure_ascii=False)
+
+    @api("/sticker/pack/create", methods=["POST"])
+    def create_sticker_pack(req):
+        uid, password = req.get("uid"), req.get("password")
+        name, prefix = req.get("name"), req.get("prefix")
+        if sticker_cursor is None or not user_cursor.verify_user(uid, password) or not isinstance(name, str) or not name.strip() or not isinstance(prefix, str) or not prefix.strip():
+            return json.dumps({"success": False, "error": "invalid_request"})
+        cfg = read_config()
+        local_day = datetime.now().date().isoformat()
+        pack_id, error = sticker_cursor.create_pack(uid, name.strip(), str(req.get("description", "")).strip(), prefix.strip(), local_day, int(cfg.get("max_sticker_packs_per_user", 24)), int(cfg.get("daily_sticker_pack_creation_limit", -1)), _sticker_exempt(uid))
+        if error:
+            return json.dumps({"success": False, "error": error})
+        return json.dumps({"success": True, "pack": _sticker_pack_dict(sticker_cursor.get_pack(pack_id))}, ensure_ascii=False)
+
+    @api("/sticker/item/create", methods=["POST"])
+    def create_sticker_item(req):
+        uid, password = req.get("uid"), req.get("password")
+        pack_id, slug, file_hash = req.get("pack_id"), req.get("slug"), req.get("file_hash")
+        if sticker_cursor is None or not user_cursor.verify_user(uid, password) or not all(isinstance(value, str) and value for value in (pack_id, slug, file_hash)):
+            return json.dumps({"success": False, "error": "invalid_request"})
+        if not file_cursor.has_active_user_file(uid, file_hash):
+            return json.dumps({"success": False, "error": "file_not_owned"})
+        try:
+            file_type = _hash_file_type(file_hash)
+        except OSError:
+            return json.dumps({"success": False, "error": "file_unavailable"})
+        try:
+            sticker_path = file.file_path(port_api, file_hash)
+            sticker_bytes = open(sticker_path, "rb").read() if os.path.isfile(sticker_path) else b""
+        except OSError:
+            return json.dumps({"success": False, "error": "file_unavailable"})
+        if not is_sticker_type(sticker_bytes):
+            return json.dumps({"success": False, "error": "unsupported_sticker_type"})
+        cfg = read_config()
+        max_sticker_size = cfg.get("max_sticker_size", 1048576)
+        if max_sticker_size != -1 and len(sticker_bytes) > max_sticker_size:
+            return json.dumps({"success": False, "error": "sticker_too_large"})
+        sticker_id, error = sticker_cursor.create_sticker(uid, pack_id, slug.strip(), req.get("name"), file_hash, file_type, int(req.get("size", 0)), int(req.get("mode", 0)), int(cfg.get("max_stickers_per_pack", 24)), _sticker_exempt(uid))
+        if error:
+            return json.dumps({"success": False, "error": error})
+        item = sticker_cursor.query("SELECT id, pack_id, slug, name, file_hash, file_type, position, render_size, render_mode, created_at FROM stickers WHERE id = ?", (sticker_id,))[0]
+        file_cursor.add_reference(file_hash, "sticker", sticker_id, uid)
+        return json.dumps({"success": True, "sticker": _sticker_item_dict(item)}, ensure_ascii=False)
+
+    @api("/sticker/pack/update", methods=["POST"])
+    def update_sticker_pack(req):
+        uid, password, pack_id = req.get("uid"), req.get("password"), req.get("pack_id")
+        if sticker_cursor is None or not user_cursor.verify_user(uid, password) or not isinstance(pack_id, str) or not sticker_cursor.can_manage_pack(uid, pack_id, _sticker_exempt(uid)):
+            return json.dumps({"success": False, "error": "forbidden"})
+        name = req.get("name"); prefix = req.get("prefix"); description = req.get("description")
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            return json.dumps({"success": False, "error": "invalid_request"})
+        if prefix is not None and (not isinstance(prefix, str) or not prefix.strip()):
+            return json.dumps({"success": False, "error": "invalid_request"})
+        try:
+            sticker_cursor.update_pack(pack_id, name=name.strip() if isinstance(name, str) else None, description=description.strip() if isinstance(description, str) else None, prefix=prefix.strip() if isinstance(prefix, str) else None)
+        except Exception:
+            return json.dumps({"success": False, "error": "conflict"})
+        return json.dumps({"success": True, "pack": _sticker_pack_dict(sticker_cursor.get_pack(pack_id))}, ensure_ascii=False)
+
+    @api("/sticker/pack/delete", methods=["POST"])
+    def delete_sticker_pack(req):
+        uid, password, pack_id = req.get("uid"), req.get("password"), req.get("pack_id")
+        if sticker_cursor is None or not user_cursor.verify_user(uid, password) or not isinstance(pack_id, str) or not sticker_cursor.can_manage_pack(uid, pack_id, _sticker_exempt(uid)):
+            return json.dumps({"success": False, "error": "forbidden"})
+        hashes = sticker_cursor.delete_pack(pack_id)
+        for sticker_id, file_hash in hashes:
+            file_cursor.remove_reference(file_hash, "sticker", sticker_id)
+        return json.dumps({"success": True})
+
+    @api("/sticker/item/delete", methods=["POST"])
+    def delete_sticker_item(req):
+        uid, password, pack_id, sticker_id = req.get("uid"), req.get("password"), req.get("pack_id"), req.get("sticker_id")
+        if sticker_cursor is None or not user_cursor.verify_user(uid, password) or not all(isinstance(value, str) for value in (pack_id, sticker_id)) or not sticker_cursor.can_manage_pack(uid, pack_id, _sticker_exempt(uid)):
+            return json.dumps({"success": False, "error": "forbidden"})
+        file_hash = sticker_cursor.delete_sticker(pack_id, sticker_id)
+        if file_hash is None:
+            return json.dumps({"success": False, "error": "not_found"})
+        file_cursor.remove_reference(file_hash, "sticker", sticker_id)
+        return json.dumps({"success": True})
+
+    @api("/sticker/item/reorder", methods=["POST"])
+    def reorder_sticker_items(req):
+        uid, password, pack_id, ids = req.get("uid"), req.get("password"), req.get("pack_id"), req.get("sticker_ids")
+        if sticker_cursor is None or not user_cursor.verify_user(uid, password) or not isinstance(pack_id, str) or not isinstance(ids, list) or not all(isinstance(value, str) for value in ids) or not sticker_cursor.can_manage_pack(uid, pack_id, _sticker_exempt(uid)):
+            return json.dumps({"success": False, "error": "forbidden"})
+        return json.dumps({"success": sticker_cursor.reorder_stickers(pack_id, ids)})
+
+    @api("/sticker/ownership/reorder", methods=["POST"])
+    def reorder_sticker_ownership(req):
+        uid, password, ids = req.get("uid"), req.get("password"), req.get("pack_ids")
+        if (sticker_cursor is None or not user_cursor.verify_user(uid, password)
+                or not isinstance(ids, list)
+                or not all(isinstance(value, str) for value in ids)):
+            return json.dumps({"success": False, "error": "invalid_request"})
+        return json.dumps({"success": sticker_cursor.reorder_owned(uid, ids)})
+
+    @api("/sticker/ownership", methods=["POST"])
+    def sticker_ownership(req):
+        uid, password, pack_id = req.get("uid"), req.get("password"), req.get("pack_id")
+        if sticker_cursor is None or not user_cursor.verify_user(uid, password) or not isinstance(pack_id, str):
+            return json.dumps({"success": False, "error": "invalid_request"})
+        owned = bool(req.get("owned", True))
+        return json.dumps({"success": sticker_cursor.set_owned(uid, pack_id, owned)})
 
     @api("/forum/create_forum", methods=["POST"])
     def create_forum(req):
@@ -1247,6 +1485,25 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     @app.route("/forum/get_forum_list")
     def get_forum_list():
         return forum_cursor.query_all_forums()
+
+    @app.route("/forum/search")
+    def search_forum():
+        query_text = flask_request.args.get("query", "").strip()
+        if not query_text:
+            return json.dumps({"forums": [], "posts": [], "total": 0})
+        try:
+            fid = flask_request.args.get("fid")
+            fid = int(fid) if fid is not None else None
+            offset = max(int(flask_request.args.get("offset", 0)), 0)
+            limit = min(max(int(flask_request.args.get("limit", 30)), 1), 50)
+        except ValueError:
+            return json.dumps({"forums": [], "posts": [], "total": 0})
+        forums, posts, total = forum_cursor.search(query_text, fid, offset, limit)
+        return json.dumps({
+            "forums": [{"fid": row[0], "forum_name": row[1], "introduction": row[2], "post_num": row[3]} for row in forums],
+            "posts": [{"fid": row[0], "pid": row[1], "title": row[2], "sender_uid": row[3], "content": row[4], "send_time": row[5]} for row in posts],
+            "total": total,
+        }, ensure_ascii=False)
     
     @api("/forum/send_post", methods=["POST"])
     def send_post(req):
@@ -1257,6 +1514,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         title = req["title"]
         content = req["content"]
+        if not isinstance(title, str):
+            title = ""
+        if not isinstance(content, str):
+            content = ""
+        if not title.strip() and not content.strip():
+            return bool_res()[False]
         raw_attachments = req.get("attachments", req.get("attachment_hashes", []))
         if raw_attachments is None:
             raw_attachments = []
@@ -1305,6 +1568,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if pid is False:
             file.release_references(port_api, acquired, file_cursor)
             return bool_res()[False]
+        for hashes in attachment_hashes:
+            file_cursor.add_reference(hashes, "forum_post", "{}:{}".format(fid, pid), uid)
         forum_info = forum_cursor.query_forum_fid(fid)
         forum_name = forum_info[0][1] if forum_info else str(fid)
         mentioned_uids = resolve_mentioned_uids(
@@ -1370,8 +1635,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             avatar.clean_avatar(port_api, fid, "forum")
         except Exception:
             return bool_res()[False]
-        attachment_hashes = forum_cursor.delete_forum(fid)
-        file.release_references(port_api, attachment_hashes, file_cursor)
+        attachment_references = forum_cursor.get_file_reference_rows(fid=fid)
+        forum_cursor.delete_forum(fid)
+        for hashes, source_type, source_id, _ in attachment_references:
+            file_cursor.remove_reference(hashes, source_type, source_id)
         return bool_res()[True]
     
     @api("/forum/edit_forum", methods=["POST"])
@@ -1445,11 +1712,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not (user_stat in ["admin", "root"] or uid == creater_post or
                 (forum_role is not None and forum_role >= 50)):
             return bool_res()[False]
-        attachment_hashes = forum_cursor.delete_post(fid, pid)
-        file.release_references(
-            port_api, attachment_hashes, file_cursor,
-            read_config().get("file_last_time", 72),
-        )
+        attachment_references = forum_cursor.get_file_reference_rows(fid=fid, pid=pid)
+        forum_cursor.delete_post(fid, pid)
+        for hashes, source_type, source_id, _ in attachment_references:
+            file_cursor.remove_reference(hashes, source_type, source_id)
         if uid != creater_post:
             notify_user(
                 creater_post, "forum.post.deleted", "你的帖子已被删除",
@@ -1884,16 +2150,18 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         rows = file_cursor.get_user_files(uid)
         result = []
         for row in rows:
+            hashes = row[0]
+            meta = file_cursor.get_metadata(hashes) or {}
             result.append({
-                "hash" : row[0],
+                "hash" : hashes,
                 "file_name" : row[1],
                 "upload_time" : row[2],
-                "size" : row[3],
-                "ref_count" : row[4],
-                "upload_user_count" : row[5],
-                "mime_type" : row[6] or "application/octet-stream",
+                "size" : meta.get("size", 0),
+                "ref_count" : 0,
+                "upload_user_count" : 0,
+                "mime_type" : "application/octet-stream",
                 "extension" : row[7] or "",
-                "download_url" : "/file/get_file/{}".format(row[0]),
+                "download_url" : "/file/get_file/{}".format(hashes),
             })
         return json.dumps(result, ensure_ascii=False)
 
@@ -1945,19 +2213,21 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                     username = uq[0][1]
             except Exception:
                 pass
+            hashes = row[1]
+            meta = file_cursor.get_metadata(hashes) or {}
             result.append({
                 "uid" : row[0],
                 "username" : username,
-                "hash" : row[1],
+                "hash" : hashes,
                 "file_name" : row[2],
                 "upload_time" : row[3],
-                "size" : row[4],
-                "ref_count" : row[5],
-                "upload_user_count" : row[6],
-                "sender" : row[7],
-                "mime_type" : row[8] or "application/octet-stream",
+                "size" : meta.get("size", 0),
+                "ref_count" : 0,
+                "upload_user_count" : 0,
+                "sender" : "",
+                "mime_type" : "application/octet-stream",
                 "extension" : row[9] or "",
-                "download_url" : "/file/get_file/{}".format(row[1]),
+                "download_url" : "/file/get_file/{}".format(hashes),
             })
         return json.dumps(result, ensure_ascii=False)
 
@@ -1982,26 +2252,32 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         metadata = file_metadata(hashes)
         if metadata is None:
             return {}
-        qry = file_cursor.return_file(hashes)[0]
-        metadata.update({
-            "sender": qry[0],
-            "ref_count": qry[5] if len(qry) > 5 else 1,
-            "last_ref_time": qry[6] if len(qry) > 6 else qry[2],
-            "upload_user_count": qry[8] if len(qry) > 8 else 1,
-        })
+        uploaders = file_cursor.query(
+            "SELECT COUNT(*) FROM file_uploaders WHERE hash = ?", (hashes,)
+        )
+        metadata["upload_user_count"] = uploaders[0][0] if uploaders else 0
         return metadata
 
     @app.route("/file/get_file/<hashes>")
     def get_file(hashes : str):
-        qry = file_cursor.return_file(hashes)
-        if not qry:
+        if not file_cursor.file_exists(hashes):
             return ("", 404)
-        row = qry[0]
         metadata = file_metadata(hashes) or {}
+        download_name = metadata.get("file_name") or hashes
+        ext = os.path.splitext(download_name)[1].lower()
+        mimetype_map = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".gif": "image/gif", ".bmp": "image/bmp", ".svg": "image/svg+xml",
+            ".mp4": "video/mp4", ".webm": "video/webm", ".mkv": "video/x-matroska",
+            ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
+            ".pdf": "application/pdf", ".zip": "application/zip",
+            ".tgs": "application/octet-stream",
+        }
         return send_file(
             "res/{}/file/{}.file".format(port_api, hashes),
-            download_name=row[1], as_attachment=True,
-            mimetype=metadata.get("mime_type"),
+            download_name=download_name,
+            as_attachment=True,
+            mimetype=mimetype_map.get(ext),
         )
     
     @api("/announcement/upload_announcement", methods=['POST'])
@@ -2674,6 +2950,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                     "status": "sent", "message": existing,
                 }, ensure_ascii=False)
 
+            if file_hash:
+                file_cursor.add_reference(file_hash, "message", msg_record["mid"], uid)
+
             if content_type == "plain":
                 allowed_mentions = group_cursor.get_member_uids(group_id) if group_id else [target_uid]
                 mentioned_uids = resolve_mentioned_uids(
@@ -2688,10 +2967,11 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 str(msg_record["send_time"]),
                 content,
                 sender="G{}U{}".format(group_id, uid) if group_id else "U{}".format(uid),
-                meta=quote
+                meta={"quote": quote}
             )
             notif["mid"] = msg_record["mid"]
             notif["client_mid"] = client_mid
+            notif["quote"] = quote
             notif["mentioned_uids"] = mentioned_uids
             notif["quote_preview"] = (
                 messages_cursor.get_quote_preview(quote, msg_record) if quote >= 0 else None
@@ -2937,6 +3217,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return json.dumps({"success": False, "error": "forbidden"})
         if not messages_cursor.recall_message(mid, uid):
             return json.dumps({"success": False, "error": "already_recalled"})
+        if message.get("file_hash"):
+            file_cursor.remove_reference(message["file_hash"], "message", mid)
 
         recalled = messages_cursor.get_message(mid)
         notification_cursor.redact_recalled_message(mid)

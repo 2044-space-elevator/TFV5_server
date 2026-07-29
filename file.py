@@ -4,7 +4,7 @@ import base64
 import time
 from db import FileDb
 import hashlib
-import mimetypes
+from file_types import detect_file_type
 import threading
 
 _upload_lock = threading.Lock()
@@ -32,7 +32,7 @@ def upload_file(port_api : int, uid : int, file_b64 : str, file_name : str, file
     content = base64.b64decode(file_b64)
     file_size = len(content)
     hashes = sha256(content)
-    mime_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+    file_type = detect_file_type(content, file_name)
     extension = os.path.splitext(file_name)[1].lower()
 
     disk_path = file_path(port_api, hashes)
@@ -47,7 +47,7 @@ def upload_file(port_api : int, uid : int, file_b64 : str, file_name : str, file
 
             file_cursor.register_upload(
                 uid, hashes, file_name, time.time(), file_size,
-                mime_type=mime_type, extension=extension,
+                mime_type=file_type, extension=extension,
             )
         except Exception:
             if wrote_blob:
@@ -62,37 +62,28 @@ def upload_file(port_api : int, uid : int, file_b64 : str, file_name : str, file
                         pass
             raise
 
-    qry = file_cursor.lose_effect(file_last_time)
-    for tmp in qry:
-        tmp_path = file_path(port_api, tmp[3])
-        if os.path.isfile(tmp_path):
-            os.remove(tmp_path)
     return hashes
 
 def dereference_file(port_api : int, uid : int, hashes : str, file_cursor : FileDb, file_last_time : float = 72.0):
-    if not file_cursor.decrement_owned_ref(uid, hashes):
-        return False
-    qry = file_cursor.lose_effect(file_last_time)
-    for tmp in qry:
-        tmp_path = file_path(port_api, tmp[3])
-        if os.path.isfile(tmp_path):
-            os.remove(tmp_path)
-    return True
+    return delete_user_file(port_api, uid, hashes, file_cursor)
 
 def delete_user_file(port_api : int, uid : int, hashes : str, file_cursor : FileDb):
     succeeded, deleted = file_cursor.delete_owned_user_file(uid, hashes)
     if not succeeded:
         return False
-    for row in deleted:
-        tmp_path = file_path(port_api, row[3])
-        if os.path.isfile(tmp_path):
-            os.remove(tmp_path)
+    # 存储空间回收
+    if deleted:
+        file_cursor.delete_blob_relations(hashes)
+        target_path = file_path(port_api, hashes)
+        if os.path.isfile(target_path):
+            os.remove(target_path)
     return True
 
 def clean_user_files(port_api : int, uid : int, file_cursor : FileDb):
     rows = file_cursor.clean_sender_files(uid) or []
     for row in rows:
-        target_path = file_path(port_api, row[3])
+        file_cursor.delete_blob_relations(row[0])
+        target_path = file_path(port_api, row[0])
         if os.path.isfile(target_path):
             os.remove(target_path)
     return rows
@@ -102,11 +93,21 @@ def release_references(port_api : int, hashes, file_cursor : FileDb,
                        file_last_time : float = 72.0):
     for file_hash in hashes:
         file_cursor.decrement_ref(file_hash)
-    deleted = file_cursor.lose_effect(file_last_time)
-    for row in deleted:
-        target_path = file_path(port_api, row[3])
+    return []
+
+
+def collect_expired(port_api: int, file_cursor: FileDb, file_last_time: float = 72.0):
+    """回收过期文件"""
+    deleted = []
+    for hashes in file_cursor.collect_expired_hashes(file_last_time):
+        file_cursor.delete_blob_relations(hashes)
+        target_path = file_path(port_api, hashes)
         if os.path.isfile(target_path):
-            os.remove(target_path)
+            try:
+                os.remove(target_path)
+            except OSError:
+                continue
+        deleted.append(hashes)
     return deleted
 
 def force_delete_file(port_api : int, hashes : str, file_cursor : FileDb):

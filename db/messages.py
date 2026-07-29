@@ -52,8 +52,8 @@ class MessagesDb(Db):
         from sqlite3 import OperationalError
         for col, typ in [("group_id", "INTEGER"), ("client_mid", "TEXT"),
                          ("deleted_at", "REAL"), ("deleted_by", "INTEGER"),
-                          ("file_name", "TEXT"),
-                          ("forwarded", "INTEGER NOT NULL DEFAULT -1")]:
+                           ("file_name", "TEXT"),
+                           ("forwarded", "INTEGER NOT NULL DEFAULT -1")]:
             try:
                 self.execute("ALTER TABLE messages ADD COLUMN {} {}".format(col, typ))
             except OperationalError:
@@ -83,9 +83,9 @@ class MessagesDb(Db):
 
     def add_message(self, sender_uid: int, receiver_uid: int, content: str,
                      content_type: str = 'plain', file_hash: str = None,
-                     quote: int = -1, group_id: int = None,
-                      client_mid: str = None, file_name: str = None,
-                      forwarded: int = -1) -> dict:
+                      quote: int = -1, group_id: int = None,
+                       client_mid: str = None, file_name: str = None,
+                       forwarded: int = -1) -> dict:
         send_time = time.time()
         from sqlite3 import IntegrityError
         with self.lock:
@@ -94,7 +94,7 @@ class MessagesDb(Db):
                     self.cursor.execute(
                         """INSERT INTO messages
                            (client_mid, sender_uid, receiver_uid, group_id, content, content_type,
-                            file_hash, send_time, quote, file_name, forwarded)
+                             file_hash, send_time, quote, file_name, forwarded)
                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (client_mid, sender_uid, receiver_uid, group_id, content, content_type,
                           file_hash, send_time, quote, file_name, forwarded),
@@ -154,15 +154,15 @@ class MessagesDb(Db):
             params.append(before_mid)
 
         sql = """SELECT mid, client_mid, sender_uid, receiver_uid, group_id,
-                        content, content_type, file_hash, send_time, quote, deleted,
-                         deleted_at, deleted_by, file_name, forwarded
-                 FROM messages WHERE {} ORDER BY mid DESC LIMIT ?""".format(where)
+                         content, content_type, file_hash, send_time, quote, deleted,
+                          deleted_at, deleted_by, file_name, forwarded
+                  FROM messages WHERE {} ORDER BY mid DESC LIMIT ?""".format(where)
         params.append(limit)
         return self.query(sql, tuple(params))
 
     _COLUMNS = ["mid", "client_mid", "sender_uid", "receiver_uid", "group_id",
-                 "content", "content_type", "file_hash", "send_time", "quote", "deleted",
-                 "deleted_at", "deleted_by", "file_name", "forwarded"]
+                  "content", "content_type", "file_hash", "send_time", "quote", "deleted",
+                  "deleted_at", "deleted_by", "file_name", "forwarded"]
 
     @staticmethod
     def _redact_recalled(record: dict) -> dict:
@@ -366,8 +366,8 @@ class MessagesDb(Db):
     def get_message(self, mid: int, include_recalled_original=False):
         rows = self.query(
             """SELECT mid, client_mid, sender_uid, receiver_uid, group_id,
-                      content, content_type, file_hash, send_time, quote, deleted,
-                       deleted_at, deleted_by, file_name, forwarded FROM messages WHERE mid = ?""",
+                       content, content_type, file_hash, send_time, quote, deleted,
+                        deleted_at, deleted_by, file_name, forwarded FROM messages WHERE mid = ?""",
             (mid,),
         )
         if not rows:
@@ -426,14 +426,14 @@ class MessagesDb(Db):
         )
         return rows[0][0] if rows else 0
 
-    def get_file_reference_counts(self) -> dict:
-        return {
-            row[0]: row[1]
+    def get_file_reference_rows(self):
+        return [
+            (row[0], "message", row[1], row[2])
             for row in self.query(
-                """SELECT file_hash, COUNT(*) FROM messages
-                   WHERE file_hash IS NOT NULL GROUP BY file_hash"""
+                """SELECT file_hash, mid, sender_uid FROM messages
+                   WHERE file_hash IS NOT NULL AND deleted = 0"""
             )
-        }
+        ]
 
     def get_room_preferences(self, uid: int) -> dict:
         rows = self.query(

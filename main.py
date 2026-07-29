@@ -8,7 +8,7 @@ import threading
 import web
 import db
 import avatar
-from file import init
+from file import init, collect_expired
 import logging
 from crypto import generate_rsa_keys, load_pub, load_pri
 import time
@@ -284,18 +284,35 @@ def main(args=None):
     FORUM_CURSOR.create_forum_table()
     FILE_CURSOR = db.FileDb("res/{}/file/file.db".format(PORT_API), PORT_API)
     FILE_CURSOR.create_file_db()
+    STICKER_CURSOR = db.StickerDb("res/{}/db/sticker.db".format(PORT_API), PORT_API)
     NOTIFICATION_CURSOR = db.NotificationsDb("res/{}/db/notification.db".format(PORT_API), PORT_API)
     MESSAGES_CURSOR = db.MessagesDb("res/{}/db/messages.db".format(PORT_API), PORT_API)
     GROUP_CURSOR = db.GroupDb("res/{}/db/group.db".format(PORT_API), PORT_API)
-    file_references = MESSAGES_CURSOR.get_file_reference_counts()
-    for hashes, count in FORUM_CURSOR.get_file_reference_counts().items():
-        file_references[hashes] = file_references.get(hashes, 0) + count
-    FILE_CURSOR.reconcile_reference_counts(file_references)
+    FILE_CURSOR.reconcile_references(
+        MESSAGES_CURSOR.get_file_reference_rows() +
+        FORUM_CURSOR.get_file_reference_rows()
+    )
+    def file_auto_collecter():
+        last_config_read = 0.0
+        expiry = 72
+        config_ttl = 300
+        while True:
+            try:
+                now = time.time()
+                if now - last_config_read > config_ttl:
+                    with open("res/{}/config.json".format(PORT_API), "r", encoding="utf-8") as handle:
+                        expiry = json.load(handle).get("file_last_time", 72)
+                    last_config_read = now
+                collect_expired(PORT_API, FILE_CURSOR, expiry)
+            except Exception as error:
+                print("[WARN] 文件回收失败: {}".format(error))
+            time.sleep(60)
+    threading.Thread(target=file_auto_collecter, name="tfv5-file-gc", daemon=True).start()
     INSTANT_CONTACT = InstantConnect(
         PORT_API, PORT_TCP, NOTIFICATION_CURSOR, USER_CURSOR,
         MESSAGES_CURSOR, GROUP_CURSOR, FILE_CURSOR,
     )
-    FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR, FILE_CURSOR, NOTIFICATION_CURSOR, MESSAGES_CURSOR, GROUP_CURSOR, INSTANT_CONTACT)
+    FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR, FILE_CURSOR, NOTIFICATION_CURSOR, MESSAGES_CURSOR, GROUP_CURSOR, INSTANT_CONTACT, STICKER_CURSOR)
     start_api = args.start_api
     if not args.cli_mode:
         prt("注意：生产环境内不要显式启动 api 服务器！", "yellow")

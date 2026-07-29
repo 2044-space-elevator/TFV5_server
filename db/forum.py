@@ -158,6 +158,49 @@ class ForumDb(Db):
     def query_all_forums(self):
         return self.query("SELECT * FROM forums ORDER BY post_num DESC")
 
+    def get_file_reference_rows(self, fid=None, cleanup_uid=None, pid=None):
+        where = []
+        params = []
+        if fid is not None:
+            where.append("c.fid = ?")
+            params.append(fid)
+        if cleanup_uid is not None:
+            where.append("(f.creater = ? OR c.creater = ?)")
+            params.extend([cleanup_uid, cleanup_uid])
+        if pid is not None:
+            where.append("c.pid = ?")
+            params.append(pid)
+        suffix = " WHERE " + " AND ".join(where) if where else ""
+        return [
+            (row[0], "forum_post", "{}:{}".format(row[1], row[2]), row[3])
+            for row in self.query(
+                """SELECT a.file_hash, c.fid, c.pid, c.creater
+                   FROM post_attachments a
+                   JOIN contents c ON c.pid = a.pid
+                   JOIN forums f ON f.fid = c.fid""" + suffix,
+                tuple(params),
+            )
+        ]
+
+    def search(self, query_text: str, fid=None, offset: int = 0, limit: int = 30):
+        """搜索功能（xsfx requestd）"""
+        escaped = "%{}%".format(query_text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_"))
+        forum_rows = self.query(
+            "SELECT fid, forumname, introduction, post_num FROM forums WHERE forumname LIKE ? ESCAPE '\\' OR introduction LIKE ? ESCAPE '\\' ORDER BY post_num DESC LIMIT ? OFFSET ?",
+            (escaped, escaped, limit, offset),
+        ) if fid is None else []
+        where = "(title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\')"
+        params = [escaped, escaped]
+        if fid is not None:
+            where += " AND fid = ?"
+            params.append(fid)
+        total = self.query("SELECT COUNT(*) FROM contents WHERE " + where, tuple(params))[0][0]
+        posts = self.query(
+            "SELECT fid, pid, title, creater, content, send_time FROM contents WHERE " + where + " ORDER BY send_time DESC LIMIT ? OFFSET ?",
+            tuple(params + [limit, offset]),
+        )
+        return forum_rows, posts, total
+
     def send_post(self, fid : int, sender : int, title : str, content : str, attachments=None):
         if len(title) > 30:
             return False

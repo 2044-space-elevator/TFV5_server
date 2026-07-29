@@ -262,3 +262,6 @@
 - `forum.post.mentioned` — 在帖子中被 @提及
 - `forum.post.deleted` — 帖子被他人删除
 - `forum.comment.deleted` — 评论被他人删除
+# 搜索
+
+- `GET /forum/search?query=<文本>&fid=<可选论坛ID>&offset=0&limit=30`：按论坛名、简介、帖子标题和正文进行服务端分页搜索。返回 `forums`、`posts` 和 `total`。
