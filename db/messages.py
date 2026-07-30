@@ -46,6 +46,16 @@ class MessagesDb(Db):
                 PRIMARY KEY (mid, uid)
             )
         """)
+        self.execute("""
+            CREATE TABLE IF NOT EXISTS group_pinned_messages (
+                pin_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id INTEGER NOT NULL,
+                group_id INTEGER NOT NULL,
+                pinned_by_uid INTEGER NOT NULL,
+                created_at REAL NOT NULL,
+                UNIQUE(message_id, group_id)
+            )
+        """)
 
     def _migrate(self):
         """尝试修复db"""
@@ -486,3 +496,65 @@ class MessagesDb(Db):
                 "INSERT OR IGNORE INTO message_mentions(mid, uid) VALUES (?, ?)",
                 values,
             )
+
+    def pin_message(self, message_id: int, group_id: int, pinned_by_uid: int) -> int:
+        with self.lock:
+            self.cursor.execute(
+                """INSERT OR IGNORE INTO group_pinned_messages
+                   (message_id, group_id, pinned_by_uid, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (message_id, group_id, pinned_by_uid, time.time()),
+            )
+            self.conn.commit()
+            return self.cursor.lastrowid
+
+    def unpin_message(self, pin_id: int) -> bool:
+        with self.lock:
+            self.cursor.execute(
+                "DELETE FROM group_pinned_messages WHERE pin_id = ?", (pin_id,),
+            )
+            self.conn.commit()
+            return self.cursor.rowcount > 0
+
+    def unpin_message_by_mid(self, message_id: int, group_id: int) -> bool:
+        with self.lock:
+            self.cursor.execute(
+                "DELETE FROM group_pinned_messages WHERE message_id = ? AND group_id = ?",
+                (message_id, group_id),
+            )
+            self.conn.commit()
+            return self.cursor.rowcount > 0
+
+    def get_pinned_messages(self, group_id: int) -> list:
+        return self.query(
+            """SELECT pin_id, message_id, group_id, pinned_by_uid, created_at
+               FROM group_pinned_messages
+               WHERE group_id = ?
+               ORDER BY created_at ASC""",
+            (group_id,),
+        )
+
+    def is_message_pinned(self, message_id: int, group_id: int) -> bool:
+        rows = self.query(
+            "SELECT 1 FROM group_pinned_messages WHERE message_id = ? AND group_id = ?",
+            (message_id, group_id),
+        )
+        return len(rows) > 0
+
+    def get_pin_by_message(self, message_id: int, group_id: int):
+        rows = self.query(
+            """SELECT pin_id, message_id, group_id, pinned_by_uid, created_at
+               FROM group_pinned_messages
+               WHERE message_id = ? AND group_id = ?""",
+            (message_id, group_id),
+        )
+        if not rows:
+            return None
+        record = rows[0]
+        return {
+            "pin_id": record[0],
+            "message_id": record[1],
+            "group_id": record[2],
+            "pinned_by_uid": record[3],
+            "created_at": record[4],
+        }

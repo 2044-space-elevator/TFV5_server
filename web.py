@@ -323,6 +323,20 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return None
         return info[0]
 
+    def get_username(uid):
+        """返回用户 uid 的用户名"""
+        row = get_user_row(uid)
+        if row is None:
+            return None
+        return row[1]
+
+    def format_user_display(uid):
+        """返回 '用户名(UID)' 或 'UID' """
+        username = get_username(uid)
+        if username is not None:
+            return "{} ({})".format(username, uid)
+        return str(uid)
+
     def verify_manager(uid, pwd):
         if not user_cursor.verify_user(uid, pwd):
             return None
@@ -2407,7 +2421,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if succeeded:
             run_notification_side_effect(
                 "group.admin.added",
-                lambda: notify_user(added, "group.admin.added", "你已成为群管理员", "你已成为群 {} 的管理员。".format(group_cursor.query_gid(gid)[0][2] if group_cursor.query_gid(gid) else str(gid)), sender=uid, meta={"gid" : gid})
+                lambda: notify_user(added, "group.admin.added", "你已成为群管理员",
+                    "你已被 {} 设置为群 {} 的管理员。".format(format_user_display(uid), group_cursor.query_gid(gid)[0][2] if group_cursor.query_gid(gid) else str(gid)),
+                    sender=uid, meta={"gid" : gid})
             )
         return bool_res()[succeeded]
     
@@ -2446,10 +2462,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if succeeded:
             run_notification_side_effect(
                 "group.member.removed",
-                lambda: notify_user(removed, "group.member.removed", "你已被移出群聊", "你已被移出群 {}。".format(group_cursor.query_gid(gid)[0][2] if group_cursor.query_gid(gid) else str(gid)), sender=uid, meta={"gid" : gid})
+                lambda: notify_user(removed, "group.member.removed", "你已被移出群聊",
+                    "你已被 {} 移出群 {}。".format(format_user_display(uid), group_cursor.query_gid(gid)[0][2] if group_cursor.query_gid(gid) else str(gid)),
+                    sender=uid, meta={"gid" : gid})
             )
         return bool_res()[succeeded]
-    
+
     @api("/group/leave", methods=['POST'])
     def group_leave(req):
         """ 成员/管理员 主动退群"""
@@ -2500,7 +2518,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if succeeded:
             run_notification_side_effect(
                 "group.admin.removed",
-                lambda: notify_user(removed, "group.admin.removed", "你的管理员权限已被移除", "你在群 {} 的管理员权限已被移除。".format(group_cursor.query_gid(gid)[0][2] if group_cursor.query_gid(gid) else str(gid)), sender=uid, meta={"gid" : gid})
+                lambda: notify_user(removed, "group.admin.removed", "你的管理员权限已被移除",
+                    "{} 移除了你在群 {} 的管理员权限。".format(format_user_display(uid), group_cursor.query_gid(gid)[0][2] if group_cursor.query_gid(gid) else str(gid)),
+                    sender=uid, meta={"gid" : gid})
             )
         return bool_res()[succeeded]
 
@@ -2532,7 +2552,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         except Exception:
             return bool_res()[False]
         group_cursor.delete_group(gid)
-        notify_users([target_uid for target_uid in target_uids if target_uid != uid], "group.deleted", "群聊已解散", "群 {} 已被解散。".format(group_name), sender=uid, meta={"gid" : gid})
+        notify_users([target_uid for target_uid in target_uids if target_uid != uid], "group.deleted", "群聊已解散",
+            "群 {} 已被 {} 解散。".format(group_name, format_user_display(uid)), sender=uid, meta={"gid" : gid})
         return bool_res()[True]
 
     @api("/group/transfer_owner", methods=['POST'])
@@ -2555,7 +2576,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if succeeded:
             run_notification_side_effect("group.owner.transferred",
                 lambda: notify_user(new_owner, "group.owner.transferred", "你已成为群主",
-                    "你已被转让为群 {} 的群主。".format(group_cursor.query_gid(gid)[0][2] if group_cursor.query_gid(gid) else str(gid)),
+                    "{} 已将群 {} 的群主转让给你。".format(format_user_display(uid), group_cursor.query_gid(gid)[0][2] if group_cursor.query_gid(gid) else str(gid)),
                     sender=uid, meta={"gid": gid}))
         return bool_res()[succeeded]
 
@@ -2606,6 +2627,89 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not updates:
             return bool_res()[False]
         return bool_res()[group_cursor.update_settings(gid, **updates)]
+
+    @api("/group/pin_message", methods=['POST'])
+    def pin_message(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        if user_row[4] == 'banned':
+            return bool_res()[False]
+        gid = req["gid"]
+        mid = req["mid"]
+        if group_cursor.is_admin(gid, uid) < 1:
+            return bool_res()[False]
+        msg = messages_cursor.get_message(mid)
+        if msg is None or msg.get("group_id") != gid or msg.get("deleted"):
+            return bool_res()[False]
+        if messages_cursor.is_message_pinned(mid, gid):
+            return bool_res()[False]
+        pin_id = messages_cursor.pin_message(mid, gid, uid)
+        if pin_id:
+            group_name = group_cursor.query_gid(gid)[0][2] if group_cursor.query_gid(gid) else str(gid)
+            member_uids = group_cursor.get_member_uids(gid)
+            notify_users(member_uids, "messages.pinned",
+                "消息已置顶",
+                "{} 在群 {} 中置顶了一条消息。".format(format_user_display(uid), group_name),
+                sender=uid, meta={"gid": gid, "mid": mid, "pin_id": pin_id})
+        return bool_res()[bool(pin_id)]
+
+    @api("/group/unpin_message", methods=['POST'])
+    def unpin_message(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        if user_row[4] == 'banned':
+            return bool_res()[False]
+        gid = req["gid"]
+        pin_id = req["pin_id"]
+        if group_cursor.is_admin(gid, uid) < 1:
+            return bool_res()[False]
+        succeeded = messages_cursor.unpin_message(pin_id)
+        if succeeded:
+            member_uids = group_cursor.get_member_uids(gid)
+            notify_users(member_uids, "messages.unpinned",
+                "消息置顶已取消",
+                "{} 取消了群中的一条消息置顶。".format(format_user_display(uid)),
+                sender=uid, meta={"gid": gid, "pin_id": pin_id})
+        return bool_res()[succeeded]
+
+    @api("/group/pinned_messages", methods=['POST'])
+    def pinned_messages(req):
+        uid = req["uid"]
+        password = req["password"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        user_row = get_user_row(uid)
+        if user_row is None:
+            return bool_res()[False]
+        if user_row[4] == 'banned':
+            return bool_res()[False]
+        gid = req["gid"]
+        if not group_cursor.is_member(gid, uid):
+            return bool_res()[False]
+        pins = messages_cursor.get_pinned_messages(gid)
+        results = []
+        for row in pins:
+            pin_id, mid, gid_val, pinned_by_uid, created_at = row
+            msg = messages_cursor.get_message(mid)
+            results.append({
+                "pin_id": pin_id,
+                "message_id": mid,
+                "group_id": gid_val,
+                "pinned_by_uid": pinned_by_uid,
+                "created_at": created_at,
+                "message": msg,
+            })
+        return json.dumps(results, ensure_ascii=False)
 
     @api("/group/members", methods=['POST'])
     def group_members(req):
@@ -2676,7 +2780,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 reviewers = [settings["creater"]] + group_cursor.get_admin_uids(gid)
                 run_notification_side_effect("group.join.request",
                     lambda: notify_users(reviewers, "group.join.request",
-                        "新的入群申请", "用户 {} 申请加入群 {}。".format(uid, settings["groupname"]),
+                        "新的入群申请", "{} 申请加入群 {}。".format(format_user_display(uid), settings["groupname"]),
                         sender=uid, meta={"gid": gid, "rid": rid}))
                 return json.dumps({"rid": rid, "pending": True})
         return bool_res()[False]
@@ -2710,7 +2814,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if succeeded:
                 run_notification_side_effect("group.invited",
                     lambda: notify_user(invited_uid, "group.invited", "你已被邀请加入群聊",
-                        "用户 {} 邀请你加入群 {}。".format(uid, settings["groupname"]),
+                        "{} 邀请你加入群 {}。".format(format_user_display(uid), settings["groupname"]),
                         sender=uid, meta={"gid": gid}))
                 return json.dumps({"pending": False})
             return bool_res()[False]
@@ -2718,11 +2822,11 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         reviewers = [settings["creater"]] + group_cursor.get_admin_uids(gid)
         run_notification_side_effect("group.join.request",
             lambda: notify_users(reviewers, "group.join.request",
-                "新的入群申请", "用户 {} 邀请 {} 加入群 {}，等待审核。".format(uid, invited_uid, settings["groupname"]),
+                "新的入群申请", "{} 邀请 {} 加入群 {}，等待审核。".format(format_user_display(uid), format_user_display(invited_uid), settings["groupname"]),
                 sender=uid, meta={"gid": gid, "rid": rid}))
         run_notification_side_effect("group.invited.pending",
             lambda: notify_user(invited_uid, "group.invited", "你已被邀请加入群聊",
-                "用户 {} 邀请你加入群 {}（需审核）。".format(uid, settings["groupname"]),
+                "{} 邀请你加入群 {}（需审核）。".format(format_user_display(uid), settings["groupname"]),
                 sender=uid, meta={"gid": gid, "rid": rid}))
         return json.dumps({"rid": rid, "pending": True})
 
@@ -3335,7 +3439,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         succeeded = user_cursor.pending_friend(uid, added, uid)
         if succeeded:
             notify_user(added, "friend.request", "新的好友申请",
-                        "用户 {} 请求添加你为好友。".format(uid), sender=uid)
+                        "{} 请求添加你为好友。".format(format_user_display(uid)), sender=uid)
         return bool_res()[succeeded]
 
     @api("/friend/deal_ship", methods=['POST'])
@@ -3360,7 +3464,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             succeeded = user_cursor.change_relationship(uid, dealt, 'friend')
             if succeeded:
                 notify_user(dealt, "friend.accepted", "好友申请已通过",
-                            "用户 {} 已通过你的好友申请。".format(uid), sender=uid)
+                            "{} 已通过你的好友申请。".format(format_user_display(uid)), sender=uid)
         else:
             user_cursor.delete_relationship(uid, dealt)
             succeeded = True
