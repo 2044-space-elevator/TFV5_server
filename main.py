@@ -193,7 +193,7 @@ def create_new_server():
     NOTIFICATION_CURSOR.create_user_table(0)
     
 def flask_thread():
-    FLASK_APP.run(host='0.0.0.0', port=PORT_API, debug=ENABLE_DEBUG, use_reloader=False)
+    FLASK_APP.run(host='0.0.0.0', port=PORT_API, debug=ENABLE_DEBUG, use_reloader=False, threaded=True)
 
 def tcp_thread():
     asyncio.run(INSTANT_CONTACT.main())

@@ -595,6 +595,45 @@ TFV5 的消息系统由两部分组成：
 
 该事件不包含被撤回消息的原始正文或文件哈希。客户端应将对应本地消息改为撤回占位，并清除引用该消息的缓存摘要。
 
+### 消息置顶推送
+
+群内有消息被置顶或取消置顶时，会向群内所有在线成员发送 `NOTIFICATION.NEW`，其 `notification.info` 为：
+
+**置顶消息**：
+
+```json
+{
+    "event" : "messages.pinned",
+    "title" : "消息已置顶",
+    "content" : "消息已在群 <group_name> 中置顶。",
+    "sender" : <operator_uid>,
+    "meta" : {
+        "gid" : <gid>,
+        "mid" : <mid>,
+        "pin_id" : <pin_id>
+    },
+    "group_id" : <gid_or_null>
+}
+```
+
+**取消置顶**：
+
+```json
+{
+    "event" : "messages.unpinned",
+    "title" : "消息置顶已取消",
+    "content" : "群中的一条消息置顶已被取消。",
+    "sender" : <operator_uid>,
+    "meta" : {
+        "gid" : <gid>,
+        "pin_id" : <pin_id>
+    },
+    "group_id" : <gid_or_null>
+}
+```
+
+客户端收到这类事件后应刷新该群的置顶消息列表。
+
 ### 输入状态
 
 客户端可发送输入状态（"正在输入..."），服务端会广播给聊天室内其他在线成员：
