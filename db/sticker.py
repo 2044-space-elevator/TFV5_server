@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import sqlite3
 import time
 import uuid
 
@@ -190,7 +191,11 @@ class StickerDb(Db):
                 self.cursor.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM stickers WHERE pack_id = ?", (pack_id,))
                 position = self.cursor.fetchone()[0]
                 sticker_id = uuid.uuid4().hex
-                self.cursor.execute("INSERT INTO stickers(id, pack_id, slug, name, file_hash, file_type, position, render_size, render_mode, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (sticker_id, pack_id, slug, name, file_hash, file_type, position, render_size, render_mode, now))
+                try:
+                    self.cursor.execute("INSERT INTO stickers(id, pack_id, slug, name, file_hash, file_type, position, render_size, render_mode, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (sticker_id, pack_id, slug, name, file_hash, file_type, position, render_size, render_mode, now))
+                except sqlite3.IntegrityError:
+                    self.conn.rollback()
+                    return None, "slug_exists"
                 self.cursor.execute("UPDATE sticker_packs SET updated_at = ? WHERE id = ?", (now, pack_id))
                 self.conn.commit()
                 return sticker_id, None
