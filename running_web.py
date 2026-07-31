@@ -7,15 +7,15 @@ from db import *
 from captcha.image import ImageCaptcha
 from crypto import load_pri
 from argon2 import PasswordHasher
-PORT_API = None
-PORT_TCP = None
+PORT_API = 7001
+PORT_TCP = 21474
 HASHER = PasswordHasher(
         time_cost=2,
         memory_cost=65536,
         parallelism=2,
         hash_len=24,
         salt_len=16
-    )
+)
 usercur = UserDb(HASHER, "res/{}/db/user.db".format(PORT_API), PORT_API, PORT_TCP)
 forumcur = ForumDb("res/{}/db/forum.db".format(PORT_API), PORT_API, PORT_TCP)
 notificur = NotificationsDb("res/{}/db/notification.db".format(PORT_API), PORT_API)

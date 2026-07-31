@@ -1,4 +1,6 @@
 import websockets
+import contextvars
+import functools
 from websockets.exceptions import InvalidMessage
 import time
 from argon2 import PasswordHasher
@@ -13,6 +15,11 @@ import logging
 from collections import defaultdict
 from mention_utils import resolve_mentioned_uids, should_alert
 
+async def to_thread(func, *args, **kwargs):
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    func_call = functools.partial(ctx.run, func, *args, **kwargs)
+    return await loop.run_in_executor(None, func_call)
 
 class _InvalidHandshakeFilter(logging.Filter):
     def filter(self, record):

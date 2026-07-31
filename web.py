@@ -3477,4 +3477,3 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 #     file.write(pub_pem)
 # usr_obj = UserDb("res/7001/db/user.db", 7001, 1145)
 # app = main(7001, 1145, pub_pem, pri, usr_obj)
-# app.run(debug=True)
