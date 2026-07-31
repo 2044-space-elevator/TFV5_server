@@ -14,6 +14,7 @@ from rate_limiter import RateLimiter
 from mention_utils import resolve_mentioned_uids, should_alert
 import time
 import threading
+from json_store import read_json, update_json
 from datetime import datetime
 from file_types import detect_file_type, is_sticker_type
 
@@ -51,8 +52,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
     def read_config():
         with locks['config']:
-            with open("res/{}/config.json".format(port_api), "r+", encoding="utf-8") as file:
-                return json.load(file)
+            return read_json("res/{}/config.json".format(port_api))
 
     group_cursor._config_reader = read_config
 
@@ -126,12 +126,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
     def update_config(mutator):
         with locks['config']:
-            with open("res/{}/config.json".format(port_api), "r+", encoding="utf-8") as file:
-                cfg = json.load(file)
-            mutator(cfg)
-            with open("res/{}/config.json".format(port_api), "w+", encoding="utf-8") as file:
-                json.dump(cfg, file)
-        return cfg
+            state = {}
+            def apply(cfg):
+                mutator(cfg)
+                state["cfg"] = dict(cfg)
+            update_json("res/{}/config.json".format(port_api), apply)
+            return state["cfg"]
 
     def serialize_server_settings(cfg, include_manage=False):
         ret = {
@@ -475,25 +475,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     def cleanup_forum_queue(target_uid : int):
         target_uid = int(target_uid)
         with locks['queue']:
-            with open("res/{}/forum/queue.json".format(port_api), "r+", encoding="utf-8") as file:
-                queue = json.load(file)
-
-            removed_keys = [
-                key
-                for key, value in queue.items()
-                if key.isdigit() and isinstance(value, dict) and value.get("creater") == target_uid
-            ]
-
-            if not removed_keys:
-                return True
-
-            for key in removed_keys:
-                del queue[key]
-
-            queue["queue_num"] = max(queue.get("queue_num", 0) - len(removed_keys), 0)
-
-            with open("res/{}/forum/queue.json".format(port_api), "w+", encoding="utf-8") as file:
-                json.dump(queue, file)
+            def cleanup(queue):
+                removed_keys = [
+                    key for key, value in queue.items()
+                    if key.isdigit() and isinstance(value, dict) and value.get("creater") == target_uid
+                ]
+                for key in removed_keys:
+                    del queue[key]
+                queue["queue_num"] = max(queue.get("queue_num", 0) - len(removed_keys), 0)
+            update_json("res/{}/forum/queue.json".format(port_api), cleanup)
 
         return True
 
@@ -618,18 +608,14 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         
         new_stat = req["change_to"]
         with locks['config']:
-            with open("res/{}/config.json".format(port_api), "r+") as file:
-                cfg = json.load(file)
-
-            if new_stat == False:
-                cfg["email_activate"] = ""
-                cfg["email_password"] = ""
-            else:
-                cfg["email_activate"] = req["verify_email"]
-                cfg["email_password"] = req["email_password"]
-
-            with open("res/{}/config.json".format(port_api), "w+") as file:
-                json.dump(cfg, file)
+            def change(cfg):
+                if new_stat == False:
+                    cfg["email_activate"] = ""
+                    cfg["email_password"] = ""
+                else:
+                    cfg["email_activate"] = req["verify_email"]
+                    cfg["email_password"] = req["email_password"]
+            update_json("res/{}/config.json".format(port_api), change)
         return bool_res()[True]
         
     @app.route("/auth/uid/<uid>")
@@ -961,11 +947,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if user_row is None or user_row[4] != 'root':
             return bool_res()[False]
         with locks['config']:
-            with open("res/{}/config.json".format(port_api), "r+") as file:
-                cfg = json.load(file)
-            cfg["captcha"] = final_stat
-            with open("res/{}/config.json".format(port_api), "w+") as file:
-                json.dump(cfg, file)
+            update_json(
+                "res/{}/config.json".format(port_api),
+                lambda cfg: cfg.__setitem__("captcha", final_stat),
+            )
         return bool_res()[True]
 
     @api("/auth/change_rate_limits", methods=['POST'])
@@ -997,14 +982,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if new_limits is not None and not isinstance(new_limits, dict):
             return bool_res()[False]
         with locks['config']:
-            with open("res/{}/config.json".format(port_api), "r+") as f:
-                cfg = json.load(f)
-            if new_limits is None:
-                cfg.pop("rate_limits", None)
-            else:
-                cfg["rate_limits"] = new_limits
-            with open("res/{}/config.json".format(port_api), "w+") as f:
-                json.dump(cfg, f)
+            def change(cfg):
+                if new_limits is None:
+                    cfg.pop("rate_limits", None)
+                else:
+                    cfg["rate_limits"] = new_limits
+            update_json("res/{}/config.json".format(port_api), change)
         limiter.reload(port_api)
         return bool_res()[True]
 
@@ -1369,30 +1352,28 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if user_stat == 'banned':
             return bool_res()[False]
         with locks['queue']:
-            with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
-                queue = json.load(file)
-            if isinstance(request_id, str) and request_id:
-                duplicate = any(
-                    isinstance(entry, dict) and
-                    entry.get("creater") == uid and
-                    entry.get("request_id") == request_id
-                    for key, entry in queue.items() if str(key).isdigit()
-                )
-                if duplicate:
-                    return bool_res()[True]
-            qid = queue['queue_num'] + 1
-            queue["queue_num"] = qid
-            for i in queue.keys():
-                if i.isdigit():
-                    qid = max(qid, int(i) + 1)
-            queue[qid] = {
-                "creater" : uid,
-                "forumname" : forum_name,
-                "introduction" : introduction,
-                "request_id" : request_id
-            } 
-            with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
-                json.dump(queue, file)
+            def enqueue(queue):
+                if isinstance(request_id, str) and request_id:
+                    duplicate = any(
+                        isinstance(entry, dict) and entry.get("creater") == uid
+                        and entry.get("request_id") == request_id
+                        for key, entry in queue.items() if str(key).isdigit()
+                    )
+                    if duplicate:
+                        return None
+                qid_value = queue['queue_num'] + 1
+                for key in queue:
+                    if str(key).isdigit():
+                        qid_value = max(qid_value, int(key) + 1)
+                queue["queue_num"] = qid_value
+                queue[qid_value] = {
+                    "creater" : uid, "forumname" : forum_name,
+                    "introduction" : introduction, "request_id" : request_id,
+                }
+                return qid_value
+            qid = update_json("res/{}/forum/queue.json".format(port_api), enqueue)
+            if qid is None:
+                return bool_res()[True]
         notify_user(uid, "forum.review.submitted", "论坛已提交审核",
                     "论坛 {} 已提交审核。".format(forum_name), sender=uid,
                     meta={"qid": qid, "forum_name": forum_name})
@@ -1418,7 +1399,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not user_stat in ["admin", "root"]:
             return bool_res()[False]
         with locks['queue']:
-            return json.dumps(json.load(open("res/{}/forum/queue.json".format(port_api), "r+")), ensure_ascii=False)
+            return json.dumps(read_json("res/{}/forum/queue.json".format(port_api)), ensure_ascii=False)
     
     @api("/forum/approve_forum", methods=["POST"])
     def approve_forum(req):
@@ -1434,32 +1415,33 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not user_stat in ["admin", "root"]:
             return bool_res()[False]
         with locks['queue']:
-            with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
-                queue = json.load(file)
-            if str(qid) not in queue:
+            def approve(queue):
+                if str(qid) not in queue:
+                    return None
+                chosen = queue[str(qid)]
+                chosen_type = chosen.get("type", "create")
+                if chosen_type == "edit":
+                    edit_fid = chosen["fid"]
+                    if not forum_cursor.query_forum_fid(edit_fid):
+                        del queue[str(qid)]
+                        queue["queue_num"] = max(queue["queue_num"] - 1, 0)
+                        return False
+                    forum_cursor.execute(
+                        "UPDATE forums SET forumname = ?, introduction = ? WHERE fid = ?",
+                        (chosen["forumname"], chosen["introduction"], edit_fid),
+                    )
+                    approved_fid = edit_fid
+                else:
+                    approved_fid = forum_cursor.create_forum(
+                        chosen["forumname"], chosen["creater"], chosen["introduction"]
+                    )
+                del queue[str(qid)]
+                queue["queue_num"] = max(queue["queue_num"] - 1, 0)
+                return chosen, chosen_type, approved_fid
+            approved = update_json("res/{}/forum/queue.json".format(port_api), approve)
+            if not approved:
                 return bool_res()[False]
-            fchosen = queue[str(qid)]
-            entry_type = fchosen.get("type", "create")
-            if entry_type == "edit":
-                edit_fid = fchosen["fid"]
-                current_forum = forum_cursor.query_forum_fid(edit_fid)
-                if not current_forum:
-                    del queue[str(qid)]
-                    queue["queue_num"] = max(queue["queue_num"] - 1, 0)
-                    with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
-                        json.dump(queue, file)
-                    return bool_res()[False]
-                forum_cursor.execute(
-                    "UPDATE forums SET forumname = ?, introduction = ? WHERE fid = ?",
-                    (fchosen["forumname"], fchosen["introduction"], edit_fid)
-                )
-                fid = edit_fid
-            else:
-                fid = forum_cursor.create_forum(fchosen["forumname"], fchosen["creater"], fchosen["introduction"])
-            del queue[str(qid)]
-            queue["queue_num"] = max(queue["queue_num"] - 1, 0)
-            with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
-                json.dump(queue, file)
+            fchosen, entry_type, fid = approved
         action_text = "编辑" if entry_type == "edit" else "创建"
         notify_user(fchosen["creater"], "forum.approved", "论坛已通过审核", "你{}的论坛 {} 已通过审核。".format(action_text, fchosen["forumname"]), sender=uid, meta={"fid" : fid, "forum_name" : fchosen["forumname"]})
         return bool_res()[True]
@@ -1482,15 +1464,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not user_stat in ["admin", "root"]:
             return bool_res()[False]
         with locks['queue']:
-            with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
-                queue = json.load(file)
-            if str(qid) not in queue:
+            def reject(queue):
+                if str(qid) not in queue:
+                    return None
+                chosen = queue.pop(str(qid))
+                queue["queue_num"] = max(queue["queue_num"] - 1, 0)
+                return chosen
+            fchosen = update_json("res/{}/forum/queue.json".format(port_api), reject)
+            if fchosen is None:
                 return bool_res()[False]
-            fchosen = queue[str(qid)]
-            del queue[str(qid)]
-            queue["queue_num"] = max(queue["queue_num"] - 1, 0)
-            with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
-                json.dump(queue, file)
         reason_suffix = "原因：{}".format(reason) if reason else ""
         action_text = "编辑" if fchosen.get("type", "create") == "edit" else "创建"
         notify_user(fchosen["creater"], "forum.rejected", "论坛未通过审核", "你{}的论坛 {} 未通过审核。{}".format(action_text, fchosen["forumname"], reason_suffix), sender=uid, meta={"qid" : qid, "fid": fchosen.get("fid"), "forum_name" : fchosen["forumname"], "reason" : reason})
@@ -1676,22 +1658,18 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         forum_name = req.get("forum_name", forum_info[0][1])
         introduction = req.get("introduction", forum_info[0][4] or "")
         with locks['queue']:
-            with open("res/{}/forum/queue.json".format(port_api), "r+") as file:
-                queue = json.load(file)
-            qid = queue['queue_num'] + 1
-            queue["queue_num"] = qid
-            for i in queue.keys():
-                if i.isdigit():
-                    qid = max(qid, int(i) + 1)
-            queue[qid] = {
-                "type" : "edit",
-                "fid" : fid,
-                "creater" : uid,
-                "forumname" : forum_name,
-                "introduction" : introduction
-            }
-            with open("res/{}/forum/queue.json".format(port_api), "w+") as file:
-                json.dump(queue, file)
+            def enqueue(queue):
+                qid_value = queue['queue_num'] + 1
+                for key in queue:
+                    if str(key).isdigit():
+                        qid_value = max(qid_value, int(key) + 1)
+                queue["queue_num"] = qid_value
+                queue[qid_value] = {
+                    "type" : "edit", "fid" : fid, "creater" : uid,
+                    "forumname" : forum_name, "introduction" : introduction,
+                }
+                return qid_value
+            qid = update_json("res/{}/forum/queue.json".format(port_api), enqueue)
         notify_user(uid, "forum.review.submitted", "论坛编辑已提交审核",
                     "论坛 {} 的编辑已提交审核。".format(forum_name), sender=uid,
                     meta={"qid": qid, "fid": fid, "forum_name": forum_name})
@@ -2673,7 +2651,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         pin_id = req["pin_id"]
         if group_cursor.is_admin(gid, uid) < 1:
             return bool_res()[False]
-        succeeded = messages_cursor.unpin_message(pin_id)
+        succeeded = messages_cursor.unpin_message(pin_id, gid)
         if succeeded:
             member_uids = group_cursor.get_member_uids(gid)
             notify_users(member_uids, "messages.unpinned",

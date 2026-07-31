@@ -77,6 +77,24 @@ class InstantConnect():
         self._ws_timestamps = defaultdict(list)
         self._ws_typing_timestamps = defaultdict(list)
         self._clients_lock = threading.Lock()
+        self._auth_lock = threading.Lock()
+        self._auth_timestamps = defaultdict(list)
+        self._auth_semaphore = asyncio.Semaphore(2)
+
+    def _check_ws_auth_rate(self, remote_address, limit: int = 5, window: float = 60.0) -> bool:
+        ip = remote_address[0] if isinstance(remote_address, tuple) else str(remote_address)
+        now = time.time()
+        with self._auth_lock:
+            timestamps = [
+                value for value in self._auth_timestamps.get(ip, [])
+                if value > now - window
+            ]
+            if len(timestamps) >= limit:
+                self._auth_timestamps[ip] = timestamps
+                return False
+            timestamps.append(now)
+            self._auth_timestamps[ip] = timestamps
+            return True
 
     def _check_ws_rate(self, uid: int, max_per_second: int = 10, bucket: str = "msg") -> bool:
         now = time.time()
@@ -221,6 +239,8 @@ class InstantConnect():
             self.connected_clients[-1].append(websocket)
             self.clients_belonged[websocket] = -1
         try:
+            if not self._check_ws_auth_rate(websocket.remote_address):
+                raise ValueError("登录请求过于频繁")
             message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
             message = json.loads(message)
             if message['type'] != 'REQ.UPDATE_AES_KEY':
@@ -239,7 +259,12 @@ class InstantConnect():
             message = json.loads(crypto.aes_decrypt(base64.b64decode(message['iv']), base64.b64decode(message['content']), self.aes_key[websocket]))
             if message['type'] != 'AUTH.LOGIN':
                 raise ValueError("{} 而非 AUTH.LOGIN".format(message.get('type')))
-            if not self.user_cursor.verify_user(message['uid'], message['password']):
+            async with self._auth_semaphore:
+                verified = await asyncio.wait_for(
+                    to_thread(self.user_cursor.verify_user, message['uid'], message['password']),
+                    timeout=10.0,
+                )
+            if not verified:
                 raise ValueError("UID {} 验证失败".format(message.get('uid')))
             with self._clients_lock:
                 self.connected_clients[-1].remove(websocket)
@@ -475,7 +500,7 @@ class InstantConnect():
                             raise
                         if msg_record.get("duplicate"):
                             if not self.messages_cursor.request_matches(
-                                    msg_record["mid"], sender_uid, send_to, file_hashes, content_type,
+                                    msg_record["mid"], sender_uid, send_to, file_hashes, "file",
                                     file_hash=file_hashes, quote=quote):
                                 self._queue_ack(
                                     websocket, client_mid, status="failed",
@@ -554,7 +579,7 @@ class InstantConnect():
                             raise
                         if msg_record.get("duplicate"):
                             if not self.messages_cursor.request_matches(
-                                    msg_record["mid"], sender_uid, 0, file_hashes, content_type,
+                                    msg_record["mid"], sender_uid, 0, file_hashes, "file",
                                     file_hash=file_hashes, quote=quote, group_id=gid):
                                 self._queue_ack(
                                     websocket, client_mid, status="failed",

@@ -1,48 +1,41 @@
 from time import time
-import json
+from json_store import read_json, update_json
 
 def edit_announcement(port_api : int, time_stamp : str, content : str, lock):
     with lock:
-        with open("res/{}/announcement.json".format(port_api), "r+") as file:
-            cfg = json.load(file)
-        if time_stamp not in cfg.keys():
-            return False
-        cfg[time_stamp]["content"] = content
-        with open("res/{}/announcement.json".format(port_api), "w+") as file:
-            json.dump(cfg, file)
-    return True
+        def edit(cfg):
+            if time_stamp not in cfg:
+                return False
+            cfg[time_stamp]["content"] = content
+            return True
+        return update_json("res/{}/announcement.json".format(port_api), edit)
 
 def upload_announcement(port_api : int, sender : int, content : str, lock): 
     time_stamp = str(time())
     with lock:
-        with open("res/{}/announcement.json".format(port_api), "r+") as file:
-            cfg = json.load(file)
-        cfg[time_stamp] = {"content" : content, "sender" : sender}
-        with open("res/{}/announcement.json".format(port_api), "w+") as file:
-            json.dump(cfg, file)
+        update_json(
+            "res/{}/announcement.json".format(port_api),
+            lambda cfg: cfg.__setitem__(time_stamp, {"content" : content, "sender" : sender}),
+        )
     return time_stamp
 
 def delete_announcement(port_api : int, time_stamp : str, lock):
     with lock:
-        with open("res/{}/announcement.json".format(port_api), "r+") as file:
-            cfg = json.load(file)
-        if time_stamp not in cfg.keys():
-            return False
-        del cfg[time_stamp]
-        with open("res/{}/announcement.json".format(port_api), "w+") as file:
-            json.dump(cfg, file)
-    return True
+        def delete(cfg):
+            if time_stamp not in cfg:
+                return False
+            del cfg[time_stamp]
+            return True
+        return update_json("res/{}/announcement.json".format(port_api), delete)
 
 def query_all(port_api : int, lock):
     with lock:
-        with open("res/{}/announcement.json".format(port_api), "r+") as file:
-            cfg = json.load(file)
+        cfg = read_json("res/{}/announcement.json".format(port_api))
     return cfg
 
 def query_single(port_api :int, time_stamp : str, lock):
     with lock:
-        with open("res/{}/announcement.json".format(port_api), "r+") as file:
-            cfg = json.load(file)
+        cfg = read_json("res/{}/announcement.json".format(port_api))
     if time_stamp not in cfg.keys():
         return {}
     return cfg[time_stamp]

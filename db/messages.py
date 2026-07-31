@@ -508,10 +508,11 @@ class MessagesDb(Db):
             self.conn.commit()
             return self.cursor.lastrowid
 
-    def unpin_message(self, pin_id: int) -> bool:
+    def unpin_message(self, pin_id: int, group_id: int) -> bool:
         with self.lock:
             self.cursor.execute(
-                "DELETE FROM group_pinned_messages WHERE pin_id = ?", (pin_id,),
+                "DELETE FROM group_pinned_messages WHERE pin_id = ? AND group_id = ?",
+                (pin_id, group_id),
             )
             self.conn.commit()
             return self.cursor.rowcount > 0

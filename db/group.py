@@ -40,6 +40,17 @@ class GroupDb(Db):
                 request_time REAL NOT NULL
             )
         """)
+        self.execute("""
+            CREATE TABLE IF NOT EXISTS group_id_sequence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT
+            )
+        """)
+        self.execute("""
+            INSERT OR IGNORE INTO group_id_sequence(id)
+            SELECT MAX(gid) FROM groups
+            WHERE EXISTS(SELECT 1 FROM groups)
+              AND NOT EXISTS(SELECT 1 FROM group_id_sequence)
+        """)
         self._migrate()
 
     def _migrate(self):
@@ -222,8 +233,8 @@ class GroupDb(Db):
                 self.cursor.execute("SELECT COUNT(*) FROM groups WHERE creater = ?", (creater,))
                 if limit != -1 and self.cursor.fetchone()[0] >= limit:
                     return 0
-                self.cursor.execute("SELECT COALESCE(MAX(gid), 0) + 1 FROM groups")
-                gid = self.cursor.fetchone()[0]
+                self.cursor.execute("INSERT INTO group_id_sequence DEFAULT VALUES")
+                gid = self.cursor.lastrowid
                 self.cursor.execute(
                     """INSERT INTO groups (gid, creater, groupname,
                        enter_hint, introduction, allow_direct_join, require_review)

@@ -6,6 +6,7 @@ from channel import InstantConnect
 from captcha.image import ImageCaptcha
 import threading
 import web
+from json_store import update_json, write_json
 import db
 import avatar
 from file import init, collect_expired
@@ -108,25 +109,15 @@ def create_new_server():
     if not os.path.exists("res/{}/captcha".format(PORT_API)):
         os.makedirs("res/{}/captcha".format(PORT_API))
     
-    if not os.path.isfile(os.path.join(os.getcwd(), "server_config.json")):
-        with open("server_config.json", "w+") as file:
-            file.write('')
-
     with open("res/{}/secret/pub.pem".format(PORT_API), "wb") as file:
         file.write(pub_pem)
     with open("res/{}/secret/pri.pem".format(PORT_API), "wb") as file:
         file.write(pri_pem)
     
-    with open("server_config.json", "r+") as file:
-        try:
-            config = json.load(file)
-            config[str(len(config))] = [PORT_API, PORT_TCP]
-        except Exception as e: 
-            config = dict()
-            config["0"] = [PORT_API, PORT_TCP]
-
-    with open("server_config.json", "w+") as file:    
-        json.dump(config, file)
+    def add_server(config):
+        next_id = max((int(key) for key in config if str(key).isdigit()), default=-1) + 1
+        config[str(next_id)] = [PORT_API, PORT_TCP]
+    update_json("server_config.json", add_server, default=dict)
 
     print("创建数据库与配置文件……")
     if not os.path.exists("res/{}/db".format(PORT_API)):
@@ -151,23 +142,12 @@ def create_new_server():
         "max_file_size" : -1,
         "user_storage_quota" : -1
     }
-    with open("res/{}/config.json".format(PORT_API), "w+") as file:
-        json.dump(cfg, file) 
-
-    with open("res/{}/captcha/captcha.json".format(PORT_API), "w+") as file:
-        file.write("{}") 
-
-    with open("res/{}/activate.json".format(PORT_API), "w+") as file:
-        file.write("{}") 
-
-    with open("res/{}/forum/queue.json".format(PORT_API), "w+") as file:
-        file.write('{"queue_num" : 0}')
-    
-    with open("res/{}/forum/comments.json".format(PORT_API), "w+") as file:
-        file.write("{}")
-    
-    with open("res/{}/announcement.json".format(PORT_API), "w+") as file:
-        file.write("{}")
+    write_json("res/{}/config.json".format(PORT_API), cfg)
+    write_json("res/{}/captcha/captcha.json".format(PORT_API), {})
+    write_json("res/{}/activate.json".format(PORT_API), {})
+    write_json("res/{}/forum/queue.json".format(PORT_API), {"queue_num": 0})
+    write_json("res/{}/forum/comments.json".format(PORT_API), {})
+    write_json("res/{}/announcement.json".format(PORT_API), {})
 
     avatar.init(PORT_API)
     USER_CURSOR = db.UserDb(HASHER, "res/{}/db/user.db".format(PORT_API), PORT_API, PORT_TCP)

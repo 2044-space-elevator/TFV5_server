@@ -1,7 +1,7 @@
 from db.tool import Db
 from time import time
-import json
 import threading
+from json_store import read_json, update_json
 
 
 _comments_locks = {}
@@ -23,18 +23,12 @@ def get_comments_lock(port_api : int):
 
 def read_comments(port_api : int):
     with get_comments_lock(port_api):
-        with open(comments_path(port_api), "r", encoding="utf-8") as file:
-            return json.load(file)
+        return read_json(comments_path(port_api))
 
 
 def update_comments(port_api : int, callback):
     with get_comments_lock(port_api):
-        with open(comments_path(port_api), "r+", encoding="utf-8") as file:
-            comments = json.load(file)
-        result = callback(comments)
-        with open(comments_path(port_api), "w+", encoding="utf-8") as file:
-            json.dump(comments, file)
-        return result
+        return update_json(comments_path(port_api), callback)
 
 class ForumDb(Db):
     def __init__(self, path : str, port_api : int, port_tcp : int):
