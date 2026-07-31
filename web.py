@@ -38,6 +38,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     ~_cursor 表示 db.tool.Db 对象
     """
     app = Flask(__name__)
+
+    @app.after_request
+    def allow_cross_origin_requests(response):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = flask_request.headers.get(
+            "Access-Control-Request-Headers", "Content-Type, Authorization"
+        )
+        return response
+
     api = return_app_route(app, pri)
     limiter = RateLimiter(port_api)
     manager_auths = {"admin", "root"}
