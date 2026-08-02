@@ -241,3 +241,6 @@ class StickerDb(Db):
         return self.query("""SELECT o.pack_id, o.position, p.id, p.creator_uid, p.name, p.description, p.prefix, p.icon_hash, p.created_at, p.updated_at, p.usage_count
                              FROM user_sticker_packs o JOIN sticker_packs p ON p.id = o.pack_id
                              WHERE o.uid = ? AND p.is_deleted = 0 ORDER BY o.position""", (uid,))
+
+    def query_hash_exist(self, hashes):
+        return self.query("SELECT * FROM stickers WHERE file_hash = ?", (hashes, ))

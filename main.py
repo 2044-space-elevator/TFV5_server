@@ -283,7 +283,7 @@ def main(args=None):
                     with open("res/{}/config.json".format(PORT_API), "r", encoding="utf-8") as handle:
                         expiry = json.load(handle).get("file_last_time", 72)
                     last_config_read = now
-                collect_expired(PORT_API, FILE_CURSOR, expiry)
+                collect_expired(PORT_API, STICKER_CURSOR, FILE_CURSOR, expiry)
             except Exception as error:
                 print("[WARN] 文件回收失败: {}".format(error))
             time.sleep(60)

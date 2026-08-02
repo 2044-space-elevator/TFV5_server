@@ -96,10 +96,12 @@ def release_references(port_api : int, hashes, file_cursor : FileDb,
     return []
 
 
-def collect_expired(port_api: int, file_cursor: FileDb, file_last_time: float = 72.0):
+def collect_expired(port_api: int, sticker_cursor,  file_cursor: FileDb, file_last_time: float = 0.0):
     """回收过期文件"""
     deleted = []
     for hashes in file_cursor.collect_expired_hashes(file_last_time):
+        if sticker_cursor.query_hash_exist(hashes):
+            continue
         file_cursor.delete_blob_relations(hashes)
         target_path = file_path(port_api, hashes)
         if os.path.isfile(target_path):

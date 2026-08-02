@@ -7,6 +7,7 @@ res/*
 *.db-shm
 *.db-wal
 *.png
+*.json.lock
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
