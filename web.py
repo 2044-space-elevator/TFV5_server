@@ -2443,14 +2443,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         if not succeed:
             return bool_res()[False]
         sender = messages_cursor.get_message(mid)["sender_uid"]
+        target_uids = group_cursor.get_member_uids(gid)
         if succeed: 
-            run_notification_side_effect(
-                "group.essence.add",
-                lambda: notify_user(
-                    sender, "grup.essence.add", "精华设置", "你的消息被设置为精华",
-                    sender=uid, meta={"gid": gid}
-                )
-            )
+            notify_users(target_uids, "group.essence.add", "消息被设定精华", "管理员 {} 将用户 {} 的消息设为精华".format(uid, sender), sender=uid, meta={"gid" : gid})
 
         return bool_res()[succeed]
 
@@ -2465,18 +2460,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         stat = group_cursor.is_admin(gid, uid);
         if stat < 1:
             return bool_res()[False]
+        sender = messages_cursor.get_message(mid)["sender_uid"]
         succeed = group_cursor.remove_essence(gid, mid)
         if not succeed:
             return bool_res()[False]
-        sender = messages_cursor.get_message(mid)["sender_uid"]
+        target_uids = group_cursor.get_member_uids(gid)
         if succeed: 
-            run_notification_side_effect(
-                "group.essence.remove",
-                lambda: notify_user(
-                    sender, "grup.essence.remove", "精华设置", "你的消息被移除精华",
-                    sender=uid, meta={"gid": gid}
-                )
+            notify_users(
+                target_uids, "group.essence.remove", "消息被移除精华", "管理员 {} 将用户 {} 的消息移除精华".format(uid, sender), sender=uid, meta={"gid" : gid}
             )
+
         return bool_res()[succeed]
 
     @api("/group/query_essence", methods=['POST'])
