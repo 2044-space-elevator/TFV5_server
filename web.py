@@ -2428,6 +2428,43 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     #         return bool_res()[False]
     #     return bool_res()[group_cursor.add_member(gid, added)]
 
+    @api("/group/add_essence", methods=['POST'])
+    def add_essence(req):
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        mid = req["mid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        stat = group_cursor.is_admin(gid, uid);
+        if stat < 1:
+            return bool_res()[False]
+        return bool_res()[group_cursor.add_essence(gid, mid)]
+
+    @api("/group/remove_essence", methods=['POST'])
+    def remove_essence(req):
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        mid = req["mid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        stat = group_cursor.is_admin(gid, uid);
+        if stat < 1:
+            return bool_res()[False]
+        return bool_res()[group_cursor.remove_essence(gid, mid)]
+
+    @api("/group/query_essence", methods=['POST'])
+    def query_essence(req):
+        uid = req["uid"]
+        password = req["password"]
+        gid = req["gid"]
+        if not user_cursor.verify_user(uid, password):
+            return bool_res()[False]
+        if not group_cursor.is_member(gid, uid):
+            return bool_res()[False]
+        return json.dumps({"essence" : group_cursor.query_essence(gid)})
+
     @api("/group/remove_member", methods=['POST'])
     def remove_member(req):
         uid = req["uid"]

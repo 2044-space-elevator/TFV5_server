@@ -17,6 +17,9 @@ class GroupDb(Db):
             return json.load(f)
 
     def create_group_table(self):
+        """
+        essence 是精华，初始值为 []，存储 mid 时间戳
+        """
         self.execute("""
             CREATE TABLE IF NOT EXISTS groups (
                 gid INTEGER UNIQUE NOT NULL,
@@ -27,7 +30,8 @@ class GroupDb(Db):
                 enter_hint TEXT,
                 introduction TEXT,
                 allow_direct_join INTEGER NOT NULL DEFAULT 0,
-                require_review INTEGER NOT NULL DEFAULT 1
+                require_review INTEGER NOT NULL DEFAULT 1,
+                essence TEXT
             )
         """)
         self.execute("""
@@ -52,6 +56,46 @@ class GroupDb(Db):
               AND NOT EXISTS(SELECT 1 FROM group_id_sequence)
         """)
         self._migrate()
+
+    def add_essence(self, gid, mid):
+        with self.lock:
+            def _add_essence():
+                self.cursor.execute("SELECT * FROM groups WHERE gid = ?", (gid,), )
+                essence_query = self.cursor.fetchone()
+                if not essence_query:
+                    return False
+                essence_query = eval(essence_query[9])
+                if mid in essence_query:
+                    return True
+                essence_query.append(mid)
+                essence_query.sort(reverse=True)
+                self.cursor.execute("UPDATE groups SET essence = ? WHERE gid = ?", (str(essence_query), gid));
+                self.conn.commit()
+                return True;
+            return self._execute_with_retry(_add_essence)
+
+    def remove_essence(self, gid, mid):
+        with self.lock:
+            def _remove_essence():
+                self.cursor.execute("SELECT * FROM groups WHERE gid = ?", (gid,), )
+                essence_query = self.cursor.fetchone()
+                if not essence_query:
+                    return False
+                essence_query = eval(essence_query[9])
+                if not mid in essence_query:
+                    return False
+                essence_query.remove(mid)
+                self.cursor.execute("UPDATE groups SET essence = ? WHERE gid = ?", (str(essence_query), gid))
+                self.conn.commit()
+                return True
+            return self._execute_with_retry(_remove_essence)
+
+    def query_essence(self, gid):
+        essence_query = self.query("SELECT * FROM groups WHERE gid = ?", (gid, ))
+        if not essence_query:
+            return []
+        essence_query = eval(essence_query[0][9])
+        return essence_query
 
     def _migrate(self):
         from sqlite3 import OperationalError
@@ -237,10 +281,10 @@ class GroupDb(Db):
                 gid = self.cursor.lastrowid
                 self.cursor.execute(
                     """INSERT INTO groups (gid, creater, groupname,
-                       enter_hint, introduction, allow_direct_join, require_review)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                       enter_hint, introduction, allow_direct_join, require_review, essence)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                     (gid, creater, groupname, enter_hint, introduction,
-                     int(allow_direct_join), int(require_review)),
+                     int(allow_direct_join), int(require_review), "[]"),
                 )
                 self.cursor.execute(
                     "INSERT INTO group_members (gid, uid, role, join_time) VALUES (?, ?, 2, ?)",
