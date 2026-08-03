@@ -66,7 +66,7 @@ class GroupDb(Db):
                     return False
                 essence_query = eval(essence_query[9])
                 if mid in essence_query:
-                    return True
+                    return False
                 essence_query.append(mid)
                 essence_query.sort(reverse=True)
                 self.cursor.execute("UPDATE groups SET essence = ? WHERE gid = ?", (str(essence_query), gid));

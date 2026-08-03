@@ -2439,7 +2439,20 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         stat = group_cursor.is_admin(gid, uid);
         if stat < 1:
             return bool_res()[False]
-        return bool_res()[group_cursor.add_essence(gid, mid)]
+        succeed = group_cursor.add_essence(gid, mid)
+        if not succeed:
+            return bool_res()[False]
+        sender = messages_cursor.get_message(mid)["sender_uid"]
+        if succeed: 
+            run_notification_side_effect(
+                "group.essence.add",
+                lambda: notify_user(
+                    sender, "grup.essence.add", "精华设置", "你的消息被设置为精华",
+                    sender=uid, meta={"gid": gid}
+                )
+            )
+
+        return bool_res()[succeed]
 
     @api("/group/remove_essence", methods=['POST'])
     def remove_essence(req):
@@ -2452,7 +2465,19 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         stat = group_cursor.is_admin(gid, uid);
         if stat < 1:
             return bool_res()[False]
-        return bool_res()[group_cursor.remove_essence(gid, mid)]
+        succeed = group_cursor.remove_essence(gid, mid)
+        if not succeed:
+            return bool_res()[False]
+        sender = messages_cursor.get_message(mid)["sender_uid"]
+        if succeed: 
+            run_notification_side_effect(
+                "group.essence.remove",
+                lambda: notify_user(
+                    sender, "grup.essence.remove", "精华设置", "你的消息被移除精华",
+                    sender=uid, meta={"gid": gid}
+                )
+            )
+        return bool_res()[succeed]
 
     @api("/group/query_essence", methods=['POST'])
     def query_essence(req):

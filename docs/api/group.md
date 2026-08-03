@@ -452,6 +452,8 @@ TFV5 群聊系统支持创建群组、成员管理、管理员管理、入群审
 - `group.invited.pending` — 被邀请加入群聊，等待审核
 - `messages.pinned` — 群内有消息被置顶（发送给所有群成员）
 - `messages.unpinned` — 群内有消息取消置顶（发送给所有群成员）
+- `group.essence.add` — 群内有消息被设为精华（发送给被设精华的人）
+- `group.essence.remove` — 群内有消息被移除精华（发送给被移除精华的人） 
 
 ---
 
@@ -462,6 +464,27 @@ TFV5 群聊系统支持创建群组、成员管理、管理员管理、入群审
 群头像上传接口：`^ POST /avatar/upload_group_avatar`，请求体 `{"gid": <gid>, "pic": <pic_base64>}`。需要操作者为管理员或群主。
 
 群头像获取：`GET /avatar/get_avatar/group/<gid>`。
+
+---
+
+### 添加群精华
+
+- `^ POST /group/add_essence` 添加群精华
+
+```json
+{
+    "gid" : <gid>,
+    "mid" : <mid>,
+}
+```
+
+只有群管理员和群主有权操作，`<gid>` 和 `<mid>` 都是整数类型，代表群编号和群消息编号。
+
+---
+
+### 移除群精华
+
+同上。
 
 ---
 
