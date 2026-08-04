@@ -2478,7 +2478,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         else:
             return bool_res()[False]
         if succeed: 
-            notify_users(target_uids, "group.essence.add", "{} 的消息被设定精华".format(group_name), "管理员 {} 将用户 {} 的消息设为精华".format(uid, sender), sender=uid, meta={"gid" : gid})
+            notify_users(target_uids, "group.essence.add", "{} 的消息被移除精华".format(group_name), "管理员 {} 将用户 {} 的消息移除精华".format(uid, sender), sender=uid, meta={"gid" : gid})
         return bool_res()[succeed]
 
     @api("/group/query_essence", methods=['POST'])
