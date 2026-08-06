@@ -1,4 +1,5 @@
 from flask import Flask, send_file, request as flask_request
+from werkzeug.middleware.proxy_fix import ProxyFix
 import json
 import register_tool
 import base64
@@ -65,6 +66,16 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return read_json("res/{}/config.json".format(port_api))
 
     group_cursor._config_reader = read_config
+
+    _base_wsgi_app = app.wsgi_app
+    def apply_proxy_fix(cfg):
+        if cfg.get("reverse_proxy_enabled", False):
+            x_for = int(cfg.get("proxy_count", 1))
+            app.wsgi_app = ProxyFix(_base_wsgi_app, x_for=x_for, x_proto=1)
+        else:
+            app.wsgi_app = _base_wsgi_app
+
+    apply_proxy_fix(read_config())
 
     def build_notification(event : str, title : str, content : str, sender=None, meta=None):
         if isinstance(meta, dict):
@@ -179,6 +190,11 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             ret["rate_limits"] = cfg.get("rate_limits", {})
             if cfg.get("email_activate"):
                 ret["verify_email"] = cfg.get("email_activate")
+            ret["smtp_host"] = cfg.get("smtp_host", "")
+            ret["smtp_port"] = cfg.get("smtp_port", 465)
+            ret["smtp_use_ssl"] = cfg.get("smtp_use_ssl", True)
+            ret["reverse_proxy_enabled"] = cfg.get("reverse_proxy_enabled", False)
+            ret["proxy_count"] = cfg.get("proxy_count", 1)
         return ret
 
     def parse_int_setting(value, minimum=0, allow_unlimited=False):
@@ -1090,6 +1106,27 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             if "max_sticker_size" in req:
                 updates["max_sticker_size"] = parse_int_setting(req["max_sticker_size"], minimum=1, allow_unlimited=True)
 
+            if "smtp_host" in req:
+                if not isinstance(req["smtp_host"], str):
+                    return bool_res()[False]
+                updates["smtp_host"] = req["smtp_host"].strip()
+
+            if "smtp_port" in req:
+                updates["smtp_port"] = parse_int_setting(req["smtp_port"], minimum=1)
+
+            if "smtp_use_ssl" in req:
+                if not isinstance(req["smtp_use_ssl"], bool):
+                    return bool_res()[False]
+                updates["smtp_use_ssl"] = req["smtp_use_ssl"]
+
+            if "reverse_proxy_enabled" in req:
+                if not isinstance(req["reverse_proxy_enabled"], bool):
+                    return bool_res()[False]
+                updates["reverse_proxy_enabled"] = req["reverse_proxy_enabled"]
+
+            if "proxy_count" in req:
+                updates["proxy_count"] = parse_int_setting(req["proxy_count"], minimum=0)
+
             if not updates:
                 return bool_res()[False]
 
@@ -1099,6 +1136,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             # 重新加载 ws
             if "max_message_length" in updates:
                 instant_contact._load_config()
+            # 反代配置变更时重新包装 wsgi 中间件
+            if "reverse_proxy_enabled" in updates or "proxy_count" in updates:
+                apply_proxy_fix(cfg)
             return json.dumps(serialize_server_settings(cfg, include_manage=True), ensure_ascii=False)
         except Exception:
             return bool_res()[False]

@@ -133,6 +133,11 @@ def create_new_server():
         "email_activate" : "",
         "captcha" : False,
         "email_password" : "",
+        "smtp_host" : "",
+        "smtp_port" : 465,
+        "smtp_use_ssl" : True,
+        "reverse_proxy_enabled" : False,
+        "proxy_count" : 1,
         "file_last_time" : 72,
         "groups_limit" : 30,
         "single_group_max_people" : 200,
@@ -171,7 +176,61 @@ def create_new_server():
     USER_CURSOR.user_create(root_username, root_password, time.time())
     USER_CURSOR.change_auth(0, "root")
     NOTIFICATION_CURSOR.create_user_table(0)
-    
+
+    advanced_setup(cfg)
+
+def _ask_bool(prompt, default=False):
+    """询问 y/n，回车使用默认值"""
+    while True:
+        ans = input("{}（y/n，默认 {}）：".format(prompt, "y" if default else "n")).strip().lower()
+        if ans == "":
+            return default
+        if ans in ("y", "yes"):
+            return True
+        if ans in ("n", "no"):
+            return False
+        print("请输入 y 或 n。")
+
+def _ask_int(prompt, default):
+    """询问整数，回车或输入无效时使用默认值"""
+    raw = input("{}（默认 {}）：".format(prompt, default)).strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print("输入无效，使用默认值 {}。".format(default))
+        return default
+
+def advanced_setup(cfg):
+    """
+    初始化完成后的高级配置：邮箱验证服务（SMTP）与反向代理
+    """
+    prt("服务器初始化完成！", "green")
+    if not _ask_bool("是否进行高级配置？", False):
+        prt("未进行高级配置，可稍后在服务器设置中修改。", "yellow")
+        return
+    changed = False
+
+    if _ask_bool("是否配置邮箱验证服务？", False):
+        cfg["smtp_host"] = input("SMTP 服务器地址（留空按邮箱域名自动检测，如 smtp.gmail.com）：").strip()
+        cfg["smtp_port"] = _ask_int("SMTP 端口（465=SSL 直连，587=STARTTLS）", cfg["smtp_port"])
+        cfg["smtp_use_ssl"] = _ask_bool("使用 SSL 直连？(y=SSL，n=STARTTLS)", True)
+        cfg["email_activate"] = input("发件邮箱地址：").strip()
+        cfg["email_password"] = input("邮箱密码或授权码：").strip()
+        changed = True
+
+    if _ask_bool("服务器是否运行在反向代理（如 Nginx）后方？", False):
+        cfg["reverse_proxy_enabled"] = True
+        cfg["proxy_count"] = _ask_int("信任的代理层数", cfg["proxy_count"])
+        changed = True
+
+    if changed:
+        write_json("res/{}/config.json".format(PORT_API), cfg)
+        prt("高级配置已保存到 res/{}/config.json".format(PORT_API), "green")
+    else:
+        prt("未进行高级配置，可稍后在服务器设置中修改。", "yellow")
+
 def flask_thread():
     FLASK_APP.run(host='0.0.0.0', port=PORT_API, debug=ENABLE_DEBUG, use_reloader=False, threaded=True)
 
