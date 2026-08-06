@@ -57,45 +57,57 @@ class GroupDb(Db):
         """)
         self._migrate()
 
+    def _parse_essence(self, raw) -> list:
+        """安全解析 essence 列，兼容 None / JSON / Python list 字面量。"""
+        if not raw:
+            return []
+        try:
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            try:
+                result = eval(raw)
+                return result if isinstance(result, list) else []
+            except Exception:
+                return []
+
     def add_essence(self, gid, mid):
         with self.lock:
             def _add_essence():
-                self.cursor.execute("SELECT * FROM groups WHERE gid = ?", (gid,), )
-                essence_query = self.cursor.fetchone()
-                if not essence_query:
+                self.cursor.execute("SELECT essence FROM groups WHERE gid = ?", (gid,))
+                row = self.cursor.fetchone()
+                if not row:
                     return False
-                essence_query = eval(essence_query[9])
-                if mid in essence_query:
+                essence_list = self._parse_essence(row[0])
+                if mid in essence_list:
                     return False
-                essence_query.append(mid)
-                essence_query.sort(reverse=True)
-                self.cursor.execute("UPDATE groups SET essence = ? WHERE gid = ?", (str(essence_query), gid));
+                essence_list.append(mid)
+                essence_list.sort(reverse=True)
+                self.cursor.execute("UPDATE groups SET essence = ? WHERE gid = ?", (json.dumps(essence_list), gid))
                 self.conn.commit()
-                return True;
+                return True
             return self._execute_with_retry(_add_essence)
 
     def remove_essence(self, gid, mid):
         with self.lock:
             def _remove_essence():
-                self.cursor.execute("SELECT * FROM groups WHERE gid = ?", (gid,), )
-                essence_query = self.cursor.fetchone()
-                if not essence_query:
+                self.cursor.execute("SELECT essence FROM groups WHERE gid = ?", (gid,))
+                row = self.cursor.fetchone()
+                if not row:
                     return False
-                essence_query = eval(essence_query[9])
-                if not mid in essence_query:
+                essence_list = self._parse_essence(row[0])
+                if mid not in essence_list:
                     return False
-                essence_query.remove(mid)
-                self.cursor.execute("UPDATE groups SET essence = ? WHERE gid = ?", (str(essence_query), gid))
+                essence_list.remove(mid)
+                self.cursor.execute("UPDATE groups SET essence = ? WHERE gid = ?", (json.dumps(essence_list), gid))
                 self.conn.commit()
                 return True
             return self._execute_with_retry(_remove_essence)
 
     def query_essence(self, gid):
-        essence_query = self.query("SELECT * FROM groups WHERE gid = ?", (gid, ))
-        if not essence_query:
+        row = self.query("SELECT essence FROM groups WHERE gid = ?", (gid,))
+        if not row:
             return []
-        essence_query = eval(essence_query[0][9])
-        return essence_query
+        return self._parse_essence(row[0][0])
 
     def _migrate(self):
         from sqlite3 import OperationalError
@@ -105,6 +117,14 @@ class GroupDb(Db):
             pass
         try:
             self.execute("ALTER TABLE groups ADD COLUMN require_review INTEGER NOT NULL DEFAULT 1")
+        except OperationalError:
+            pass
+        try:
+            self.execute("ALTER TABLE groups ADD COLUMN essence TEXT DEFAULT '[]'")
+        except OperationalError:
+            pass
+        try:
+            self.execute("ALTER TABLE groups ADD COLUMN essence_enabled INTEGER NOT NULL DEFAULT 1")
         except OperationalError:
             pass
         self.execute("""
@@ -241,15 +261,28 @@ class GroupDb(Db):
         return bool(rows)
 
     def get_group_settings(self, gid: int) -> dict:
-        row = self.query("SELECT * FROM groups WHERE gid = ?", (gid,))
+        row = self.query(
+            """SELECT gid, creater, groupname, enter_hint, introduction,
+                      allow_direct_join, require_review, essence_enabled
+               FROM groups WHERE gid = ?""",
+            (gid,),
+        )
         if not row:
             return {}
         r = row[0]
         return {
             "gid": r[0], "creater": r[1], "groupname": r[2],
-            "enter_hint": r[5], "introduction": r[6],
-            "allow_direct_join": bool(r[7]), "require_review": bool(r[8]),
+            "enter_hint": r[3], "introduction": r[4],
+            "allow_direct_join": bool(r[5]), "require_review": bool(r[6]),
+            "essence_enabled": bool(r[7]) if r[7] is not None else True,
         }
+
+    def get_essence_enabled(self, gid: int) -> bool:
+        row = self.query("SELECT essence_enabled FROM groups WHERE gid = ?", (gid,))
+        if not row:
+            return True
+        val = row[0][0]
+        return bool(val) if val is not None else True
 
     def get_user_group_rows(self, uid: int) -> list:
         rows = self.query(
@@ -401,7 +434,7 @@ class GroupDb(Db):
 
     def update_settings(self, gid: int, **kwargs) -> bool:
         allowed = {"groupname", "enter_hint", "introduction",
-                   "allow_direct_join", "require_review"}
+                   "allow_direct_join", "require_review", "essence_enabled"}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
             return False
@@ -409,6 +442,8 @@ class GroupDb(Db):
             updates["allow_direct_join"] = int(updates["allow_direct_join"])
         if "require_review" in updates:
             updates["require_review"] = int(updates["require_review"])
+        if "essence_enabled" in updates:
+            updates["essence_enabled"] = int(updates["essence_enabled"])
         set_clause = ", ".join("{} = ?".format(k) for k in updates)
         self.execute(
             "UPDATE groups SET {} WHERE gid = ?".format(set_clause),
