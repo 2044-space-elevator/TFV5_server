@@ -60,6 +60,9 @@ IMGCAPTCHA = None
 HASHER = None
 ENABLE_DEBUG = False
 ENABLE_WERKZEUG_LOG = False
+USE_DEV_SERVER = False
+WAITRESS_THREADS = 16
+WAITRESS_CONNECTION_LIMIT = 1000
 
 # Sql 游标
 # 节省资源，一个游标用到天荒地老
@@ -74,8 +77,11 @@ def parse_args(argv=None):
     mode_group.add_argument("--create-new-config", action="store_true", help="创建新的服务器配置")
     mode_group.add_argument("--use-config", help="使用指定编号的服务器配置")
     parser.add_argument("--start-api", action="store_true", help="直接启动内置 API 服务器")
-    parser.add_argument("--debug", action="store_true", help="启动内置 API 服务器时启用 Flask debug")
-    parser.add_argument("--log", action="store_true", help="启动内置 API 服务器时输出 Werkzeug 日志")
+    parser.add_argument("--dev-server", action="store_true", help="使用 Flask 开发服务器而非 waitress（仅调试用）")
+    parser.add_argument("--debug", action="store_true", help="启动内置 API 服务器时启用 Flask debug（仅 --dev-server 有效）")
+    parser.add_argument("--log", action="store_true", help="启动内置 API 服务器时输出 Werkzeug 日志（仅 --dev-server 有效）")
+    parser.add_argument("--waitress-threads", type=int, default=16, help="waitress 工作线程数（默认 16，仅 waitress 有效）")
+    parser.add_argument("--waitress-connection-limit", type=int, default=1000, help="waitress 最大并发连接数（默认 1000，仅 waitress 有效）")
     args = parser.parse_args(argv)
     args.cli_mode = len(sys.argv) > 1 if argv is None else len(argv) > 0
     return args
@@ -232,7 +238,12 @@ def advanced_setup(cfg):
         prt("未进行高级配置，可稍后在服务器设置中修改。", "yellow")
 
 def flask_thread():
-    FLASK_APP.run(host='0.0.0.0', port=PORT_API, debug=ENABLE_DEBUG, use_reloader=False, threaded=True)
+    if USE_DEV_SERVER:
+        FLASK_APP.run(host='0.0.0.0', port=PORT_API, debug=ENABLE_DEBUG, use_reloader=False, threaded=True)
+    else:
+        from waitress import serve as waitress_serve
+        waitress_serve(FLASK_APP, host='0.0.0.0', port=PORT_API,
+                       threads=WAITRESS_THREADS, connection_limit=WAITRESS_CONNECTION_LIMIT)
 
 def tcp_thread():
     asyncio.run(INSTANT_CONTACT.main())
@@ -250,6 +261,9 @@ def main(args=None):
     global FLASK_APP
     global ENABLE_DEBUG
     global ENABLE_WERKZEUG_LOG
+    global USE_DEV_SERVER
+    global WAITRESS_THREADS
+    global WAITRESS_CONNECTION_LIMIT
     global FORUM_CURSOR
     global FILE_CURSOR
     global NOTIFICATION_CURSOR
@@ -271,6 +285,9 @@ def main(args=None):
     )
     ENABLE_DEBUG = args.debug
     ENABLE_WERKZEUG_LOG = args.log
+    USE_DEV_SERVER = args.dev_server
+    WAITRESS_THREADS = args.waitress_threads
+    WAITRESS_CONNECTION_LIMIT = args.waitress_connection_limit
     print(ASCII_LOGO)
     prt("欢迎来到 TouchFish V5 服务器！", "green")
     chosen = None
@@ -354,16 +371,18 @@ def main(args=None):
     FLASK_APP = web.main(PORT_API, PORT_TCP, pub_pem, PRI_KEY, IMGCAPTCHA, USER_CURSOR, FORUM_CURSOR, FILE_CURSOR, NOTIFICATION_CURSOR, MESSAGES_CURSOR, GROUP_CURSOR, INSTANT_CONTACT, STICKER_CURSOR)
     start_api = args.start_api
     if not args.cli_mode:
-        prt("注意：生产环境内不要显式启动 api 服务器！", "yellow")
+        prt("注意：生产环境内不适合显式启动 api 服务器！", "yellow")
         stat = input("是否直接显式启动 api 服务器？[y/N]:")
         start_api = (stat == 'Y' or stat == 'y')
 
     if start_api:
-        prt("注意：生产环境内不要显式启动 api 服务器！", "yellow")
-        print("启动 API 服务器")
-        log = logging.getLogger("werkzeug")
-        log.disabled = not ENABLE_WERKZEUG_LOG
-        FLASK_THREAD = threading.Thread(target=flask_thread)
+        if USE_DEV_SERVER:
+            prt("使用 Flask 开发服务器（仅适用于调试）", "yellow")
+            log = logging.getLogger("werkzeug")
+            log.disabled = not ENABLE_WERKZEUG_LOG
+        else:
+            prt("使用内置高性能 waitress 服务器", "green")
+        FLASK_THREAD = threading.Thread(target=flask_thread, name="tfv5-api-server")
     print("启动 TCP 服务器")
 
 

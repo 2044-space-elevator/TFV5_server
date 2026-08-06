@@ -61,9 +61,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         'announcement': threading.Lock(),
     }
 
+    _config_cache = None
     def read_config():
+        nonlocal _config_cache
+        if _config_cache is not None:
+            return dict(_config_cache)
         with locks['config']:
-            return read_json("res/{}/config.json".format(port_api))
+            cfg = read_json("res/{}/config.json".format(port_api))
+            _config_cache = dict(cfg)
+            return dict(_config_cache)
 
     group_cursor._config_reader = read_config
 
@@ -146,13 +152,15 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         return ret
 
     def update_config(mutator):
+        nonlocal _config_cache
         with locks['config']:
             state = {}
             def apply(cfg):
                 mutator(cfg)
                 state["cfg"] = dict(cfg)
             update_json("res/{}/config.json".format(port_api), apply)
-            return state["cfg"]
+            _config_cache = state["cfg"]
+            return dict(_config_cache)
 
     def serialize_server_settings(cfg, include_manage=False):
         ret = {
@@ -609,9 +617,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
     @app.route('/auth/captcha')
     def get_captcha():
-        with locks['config']:
-            with open("res/{}/config.json".format(port_api), "r+") as file:
-                captcha = json.load(file)["captcha"]
+        captcha = read_config().get("captcha", False)
         if not captcha:
             return {}
         token = register_tool.generate_captcha(port_api, ImgCaptcha, locks['captcha'])
@@ -633,15 +639,18 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         
         new_stat = req["change_to"]
-        with locks['config']:
-            def change(cfg):
-                if new_stat == False:
-                    cfg["email_activate"] = ""
-                    cfg["email_password"] = ""
-                else:
-                    cfg["email_activate"] = req["verify_email"]
-                    cfg["email_password"] = req["email_password"]
-            update_json("res/{}/config.json".format(port_api), change)
+        if new_stat:
+            verify_email = req["verify_email"]
+            email_password = req["email_password"]
+            update_config(lambda cfg: cfg.update({
+                "email_activate": verify_email,
+                "email_password": email_password,
+            }))
+        else:
+            update_config(lambda cfg: cfg.update({
+                "email_activate": "",
+                "email_password": "",
+            }))
         return bool_res()[True]
         
     @app.route("/auth/uid/<uid>")
@@ -689,12 +698,9 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
     def register(req):
         username = req["username"]
         password = req["password"]
-        is_captcha = False
-        with locks['config']:
-            with open("res/{}/config.json".format(port_api), "r+") as file:
-                cfg = json.load(file)
-                is_captcha = cfg['captcha']
-                is_email_activate = cfg["email_activate"]
+        cfg = read_config()
+        is_captcha = cfg.get("captcha", False)
+        is_email_activate = cfg.get("email_activate", "")
         if (not isinstance(username, str) or len(username) < int(cfg.get("min_username_length", 4))
                 or not isinstance(password, str) or len(password) < int(cfg.get("min_password_length", 1))):
             return bool_res()[False]
@@ -972,11 +978,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         user_row = get_user_row(uid)
         if user_row is None or user_row[4] != 'root':
             return bool_res()[False]
-        with locks['config']:
-            update_json(
-                "res/{}/config.json".format(port_api),
-                lambda cfg: cfg.__setitem__("captcha", final_stat),
-            )
+        update_config(lambda cfg: cfg.__setitem__("captcha", final_stat))
         return bool_res()[True]
 
     @api("/auth/change_rate_limits", methods=['POST'])
@@ -1007,13 +1009,12 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         new_limits = req.get("rate_limits")
         if new_limits is not None and not isinstance(new_limits, dict):
             return bool_res()[False]
-        with locks['config']:
-            def change(cfg):
-                if new_limits is None:
-                    cfg.pop("rate_limits", None)
-                else:
-                    cfg["rate_limits"] = new_limits
-            update_json("res/{}/config.json".format(port_api), change)
+        def change(cfg):
+            if new_limits is None:
+                cfg.pop("rate_limits", None)
+            else:
+                cfg["rate_limits"] = new_limits
+        update_config(change)
         limiter.reload(port_api)
         return bool_res()[True]
 
@@ -1135,7 +1136,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             cfg = update_config(_apply)
             # 重新加载 ws
             if "max_message_length" in updates:
-                instant_contact._load_config()
+                instant_contact._load_config(cfg)
             # 反代配置变更时重新包装 wsgi 中间件
             if "reverse_proxy_enabled" in updates or "proxy_count" in updates:
                 apply_proxy_fix(cfg)
