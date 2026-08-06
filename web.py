@@ -2456,6 +2456,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         stat = group_cursor.is_admin(gid, uid);
         if stat < 1:
             return bool_res()[False]
+        if not group_cursor.get_essence_enabled(gid):
+            return bool_res()[False]
         message = messages_cursor.get_message(mid)
         if message is None or message.get("group_id") != gid:
             return bool_res()[False]
@@ -2486,6 +2488,8 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         stat = group_cursor.is_admin(gid, uid);
         if stat < 1:
             return bool_res()[False]
+        if not group_cursor.get_essence_enabled(gid):
+            return bool_res()[False]
         message = messages_cursor.get_message(mid)
         if message is None or message.get("group_id") != gid:
             return bool_res()[False]
@@ -2513,7 +2517,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         if not group_cursor.is_member(gid, uid):
             return bool_res()[False]
-        return json.dumps({"essence" : group_cursor.query_essence(gid)})
+        return json.dumps({"essence" : group_cursor.query_essence(gid), "essence_enabled": group_cursor.get_essence_enabled(gid)})
 
     @api("/group/remove_member", methods=['POST'])
     def remove_member(req):
@@ -2689,7 +2693,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             return bool_res()[False]
         updates = {}
         for key in ("groupname", "enter_hint", "introduction",
-                     "allow_direct_join", "require_review"):
+                     "allow_direct_join", "require_review", "essence_enabled"):
             if key in req:
                 updates[key] = req[key]
         if "groupname" in updates:
