@@ -64,12 +64,12 @@ class GroupDb(Db):
                 essence_query = self.cursor.fetchone()
                 if not essence_query:
                     return False
-                essence_query = eval(essence_query[9])
+                essence_query = json.loads(essence_query[9])
                 if mid in essence_query:
                     return False
                 essence_query.append(mid)
                 essence_query.sort(reverse=True)
-                self.cursor.execute("UPDATE groups SET essence = ? WHERE gid = ?", (str(essence_query), gid));
+                self.cursor.execute("UPDATE groups SET essence = ? WHERE gid = ?", (json.dumps(essence_query), gid));
                 self.conn.commit()
                 return True;
             return self._execute_with_retry(_add_essence)
@@ -81,11 +81,11 @@ class GroupDb(Db):
                 essence_query = self.cursor.fetchone()
                 if not essence_query:
                     return False
-                essence_query = eval(essence_query[9])
+                essence_query = json.loads(essence_query[9])
                 if not mid in essence_query:
                     return False
                 essence_query.remove(mid)
-                self.cursor.execute("UPDATE groups SET essence = ? WHERE gid = ?", (str(essence_query), gid))
+                self.cursor.execute("UPDATE groups SET essence = ? WHERE gid = ?", (json.dumps(essence_query), gid))
                 self.conn.commit()
                 return True
             return self._execute_with_retry(_remove_essence)
@@ -94,7 +94,7 @@ class GroupDb(Db):
         essence_query = self.query("SELECT * FROM groups WHERE gid = ?", (gid, ))
         if not essence_query:
             return []
-        essence_query = eval(essence_query[0][9])
+        essence_query = json.loads(essence_query[0][9])
         return essence_query
 
     def _migrate(self):

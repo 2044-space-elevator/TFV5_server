@@ -60,9 +60,22 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         'announcement': threading.Lock(),
     }
 
+    _config_cache = {"data": None, "ts": 0.0}
+    _CONFIG_TTL = 2.0
+
+    def invalidate_config_cache():
+        _config_cache["data"] = None
+
     def read_config():
         with locks['config']:
-            return read_json("res/{}/config.json".format(port_api))
+            cached = _config_cache
+            now = time.time()
+            if cached["data"] is not None and now - cached["ts"] < _CONFIG_TTL:
+                return cached["data"]
+            data = read_json("res/{}/config.json".format(port_api))
+            cached["data"] = data
+            cached["ts"] = now
+            return data
 
     group_cursor._config_reader = read_config
 
@@ -141,6 +154,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 mutator(cfg)
                 state["cfg"] = dict(cfg)
             update_json("res/{}/config.json".format(port_api), apply)
+            invalidate_config_cache()
             return state["cfg"]
 
     def serialize_server_settings(cfg, include_manage=False):
@@ -626,6 +640,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                     cfg["email_activate"] = req["verify_email"]
                     cfg["email_password"] = req["email_password"]
             update_json("res/{}/config.json".format(port_api), change)
+            invalidate_config_cache()
         return bool_res()[True]
         
     @app.route("/auth/uid/<uid>")
@@ -961,6 +976,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 "res/{}/config.json".format(port_api),
                 lambda cfg: cfg.__setitem__("captcha", final_stat),
             )
+            invalidate_config_cache()
         return bool_res()[True]
 
     @api("/auth/change_rate_limits", methods=['POST'])
@@ -998,6 +1014,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
                 else:
                     cfg["rate_limits"] = new_limits
             update_json("res/{}/config.json".format(port_api), change)
+            invalidate_config_cache()
         limiter.reload(port_api)
         return bool_res()[True]
 
