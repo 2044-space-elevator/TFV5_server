@@ -2439,10 +2439,13 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         stat = group_cursor.is_admin(gid, uid);
         if stat < 1:
             return bool_res()[False]
+        message = messages_cursor.get_message(mid)
+        if message is None or message.get("group_id") != gid:
+            return bool_res()[False]
         succeed = group_cursor.add_essence(gid, mid)
         if not succeed:
             return bool_res()[False]
-        sender = messages_cursor.get_message(mid)["sender_uid"]
+        sender = message["sender_uid"]
         group_info = group_cursor.query_gid(gid)
         if group_info:
             group_info = group_info[0]
@@ -2466,7 +2469,10 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         stat = group_cursor.is_admin(gid, uid);
         if stat < 1:
             return bool_res()[False]
-        sender = messages_cursor.get_message(mid)["sender_uid"]
+        message = messages_cursor.get_message(mid)
+        if message is None or message.get("group_id") != gid:
+            return bool_res()[False]
+        sender = message["sender_uid"]
         succeed = group_cursor.remove_essence(gid, mid)
         if not succeed:
             return bool_res()[False]
@@ -2478,7 +2484,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         else:
             return bool_res()[False]
         if succeed: 
-            notify_users(target_uids, "group.essence.add", "{} 的消息被移除精华".format(group_name), "管理员 {} 将用户 {} 的消息移除精华".format(uid, sender), sender=uid, meta={"gid" : gid})
+            notify_users(target_uids, "group.essence.remove", "{} 的消息被移除精华".format(group_name), "管理员 {} 将用户 {} 的消息移除精华".format(uid, sender), sender=uid, meta={"gid" : gid})
         return bool_res()[succeed]
 
     @api("/group/query_essence", methods=['POST'])
