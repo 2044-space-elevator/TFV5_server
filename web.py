@@ -8,7 +8,7 @@ import os
 from db import *
 import avatar
 import file
-from sqlite3 import OperationalError
+
 import announcements
 from crypto import generate_rsa_keys, return_app_route
 from rate_limiter import RateLimiter
@@ -1531,7 +1531,7 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
 
     @app.route("/forum/get_forum_list")
     def get_forum_list():
-        return forum_cursor.query_all_forums()
+        return json.dumps(forum_cursor.query_all_forums(), ensure_ascii=False)
 
     @app.route("/forum/search")
     def search_forum():
@@ -1642,14 +1642,14 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
             posts = forum_cursor.query_all_post(fid_int)
             try:
                 pinned_pid = forum_cursor.get_pinned_pid(fid_int)
-            except Exception:
+            except forum_cursor.dialect.DatabaseError:
                 pinned_pid = None
             return json.dumps({
                 "posts": posts,
                 "post_rows": serialize_post_rows(posts),
                 "pinned_pid": pinned_pid,
             }, ensure_ascii=False)
-        except OperationalError as e:
+        except forum_cursor.dialect.DatabaseError:
             return {}
 
     @app.route("/forum/get_post/<fid>/<pid>")
@@ -2423,11 +2423,11 @@ def main(port_api : int, port_tcp : int, pub_pem, pri, ImgCaptcha, user_cursor, 
         qry = group_cursor.query_gid(gid)
         if len(qry) < 1:
             return {}
-        return list(qry[0])
-        
+        return json.dumps(list(qry[0]), ensure_ascii=False)
+
     @app.route("/group/groupname_search/<groupname>")
     def groupname_search(groupname : str):
-        return group_cursor.groupname_search(groupname)        
+        return json.dumps(group_cursor.groupname_search(groupname), ensure_ascii=False)
 
     @api("/group/add_admin", methods=['POST'])
     def add_admin(req):

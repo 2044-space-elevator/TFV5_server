@@ -8,6 +8,7 @@ import threading
 import web
 from json_store import update_json, write_json
 import db
+from db.dialect import SQLiteDialect, MySQLDialect, PostgreSQLDialect
 import avatar
 from file import init, collect_expired
 import logging
@@ -210,7 +211,7 @@ def _ask_int(prompt, default):
 
 def advanced_setup(cfg):
     """
-    初始化完成后的高级配置：邮箱验证服务（SMTP）与反向代理
+    初始化完成后的高级配置：邮箱验证服务（SMTP）、反向代理、数据库后端
     """
     prt("服务器初始化完成！", "green")
     if not _ask_bool("是否进行高级配置？", False):
@@ -230,6 +231,32 @@ def advanced_setup(cfg):
         cfg["reverse_proxy_enabled"] = True
         cfg["proxy_count"] = _ask_int("信任的代理层数", cfg["proxy_count"])
         changed = True
+
+    if _ask_bool("是否配置数据库后端？（默认使用 SQLite）", False):
+        print("可用的数据库后端：")
+        print("  1. SQLite（默认，单文件，推荐内网部署）")
+        print("  2. MySQL（适合中等规模，需先安装 MySQL 8.0+ 服务器）[EXPERIMENTAL 实验性]")
+        print("  3. PostgreSQL（适合大规模，需先安装 PostgreSQL 服务器）[EXPERIMENTAL 实验性]")
+        print("注意：MySQL/PostgreSQL 目前为实验性支持，不保证稳定性。可能造成数据丢失/崩溃，请谨慎使用！")
+        choice = input("请选择 [1/2/3]（默认 1）：").strip()
+        if choice == "2":
+            cfg["db_backend"] = "mysql"
+            cfg["db_host"] = input("MySQL 主机地址 [localhost]：").strip() or "localhost"
+            cfg["db_port"] = _ask_int("MySQL 端口", 3306)
+            cfg["db_user"] = input("MySQL 用户名：").strip()
+            cfg["db_password"] = input("MySQL 密码：").strip()
+            cfg["db_name"] = input("MySQL 数据库名 [touchfish_v5]：").strip() or "touchfish_v5"
+            changed = True
+        elif choice == "3":
+            cfg["db_backend"] = "postgresql"
+            cfg["db_host"] = input("PostgreSQL 主机地址 [localhost]：").strip() or "localhost"
+            cfg["db_port"] = _ask_int("PostgreSQL 端口", 5432)
+            cfg["db_user"] = input("PostgreSQL 用户名：").strip()
+            cfg["db_password"] = input("PostgreSQL 密码：").strip()
+            cfg["db_name"] = input("PostgreSQL 数据库名 [touchfish_v5]：").strip() or "touchfish_v5"
+            changed = True
+        else:
+            cfg["db_backend"] = "sqlite"
 
     if changed:
         write_json("res/{}/config.json".format(PORT_API), cfg)
@@ -335,15 +362,75 @@ def main(args=None):
     PRI_KEY = load_pri("res/{}/secret/pri.pem".format(PORT_API))
     pub_pem = open("res/{}/secret/pub.pem".format(PORT_API), "rb")
 
-    USER_CURSOR = db.UserDb(HASHER, "res/{}/db/user.db".format(PORT_API), PORT_API, PORT_TCP)
-    FORUM_CURSOR = db.ForumDb("res/{}/db/forum.db".format(PORT_API), PORT_API, PORT_TCP)
-    FORUM_CURSOR.create_forum_table()
-    FILE_CURSOR = db.FileDb("res/{}/file/file.db".format(PORT_API), PORT_API)
-    FILE_CURSOR.create_file_db()
-    STICKER_CURSOR = db.StickerDb("res/{}/db/sticker.db".format(PORT_API), PORT_API)
-    NOTIFICATION_CURSOR = db.NotificationsDb("res/{}/db/notification.db".format(PORT_API), PORT_API)
-    MESSAGES_CURSOR = db.MessagesDb("res/{}/db/messages.db".format(PORT_API), PORT_API)
-    GROUP_CURSOR = db.GroupDb("res/{}/db/group.db".format(PORT_API), PORT_API)
+    config_path = "res/{}/config.json".format(PORT_API)
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            server_cfg = json.load(f)
+    except Exception:
+        server_cfg = {}
+
+    db_backend = server_cfg.get("db_backend", "sqlite")
+    if db_backend in ("mysql", "postgresql"):
+        missing = [k for k in ("db_user", "db_password") if not server_cfg.get(k)]
+        if missing:
+            prt("数据库配置缺失 {}，已回退到 SQLite。".format("、".join(missing)), "yellow")
+            db_backend = "sqlite"
+    if db_backend == "mysql":
+        dialect = MySQLDialect()
+        db_dsn = {
+            "host": server_cfg.get("db_host", "localhost"),
+            "port": server_cfg.get("db_port", 3306),
+            "user": server_cfg["db_user"],
+            "password": server_cfg["db_password"],
+            "database": server_cfg.get("db_name", "touchfish_v5"),
+        }
+    elif db_backend == "postgresql":
+        dialect = PostgreSQLDialect()
+        db_dsn = {
+            "host": server_cfg.get("db_host", "localhost"),
+            "port": server_cfg.get("db_port", 5432),
+            "user": server_cfg["db_user"],
+            "password": server_cfg["db_password"],
+            "database": server_cfg.get("db_name", "touchfish_v5"),
+        }
+    else:
+        dialect = SQLiteDialect()
+        db_dsn = None
+
+    if db_dsn is not None:
+        USER_CURSOR = db.UserDb(HASHER, db_dsn, PORT_API, PORT_TCP, dialect=dialect)
+        USER_CURSOR.create_user_table()
+        USER_CURSOR.create_friend_table()
+        FORUM_CURSOR = db.ForumDb(db_dsn, PORT_API, PORT_TCP, dialect=dialect)
+        FORUM_CURSOR.create_forum_table()
+        FILE_CURSOR = db.FileDb(db_dsn, PORT_API, dialect=dialect)
+        FILE_CURSOR.create_file_db()
+        STICKER_CURSOR = db.StickerDb(db_dsn, PORT_API, dialect=dialect)
+        NOTIFICATION_CURSOR = db.NotificationsDb(db_dsn, PORT_API, dialect=dialect)
+        MESSAGES_CURSOR = db.MessagesDb(db_dsn, PORT_API, dialect=dialect)
+        GROUP_CURSOR = db.GroupDb(db_dsn, PORT_API, dialect=dialect)
+    else:
+        USER_CURSOR = db.UserDb(HASHER, "res/{}/db/user.db".format(PORT_API), PORT_API, PORT_TCP)
+        FORUM_CURSOR = db.ForumDb("res/{}/db/forum.db".format(PORT_API), PORT_API, PORT_TCP)
+        FORUM_CURSOR.create_forum_table()
+        FILE_CURSOR = db.FileDb("res/{}/file/file.db".format(PORT_API), PORT_API)
+        FILE_CURSOR.create_file_db()
+        STICKER_CURSOR = db.StickerDb("res/{}/db/sticker.db".format(PORT_API), PORT_API)
+        NOTIFICATION_CURSOR = db.NotificationsDb("res/{}/db/notification.db".format(PORT_API), PORT_API)
+        MESSAGES_CURSOR = db.MessagesDb("res/{}/db/messages.db".format(PORT_API), PORT_API)
+        GROUP_CURSOR = db.GroupDb("res/{}/db/group.db".format(PORT_API), PORT_API)
+    if db_dsn is not None and USER_CURSOR.count_users() == 0:
+        prt("外部数据库中尚无用户，请创建 root 账户。", "yellow")
+        try:
+            root_username = input("输入 root 用户的用户名：")
+            root_password = input("输入 root 用户的密码：")
+            USER_CURSOR.user_create(root_username, root_password, time.time())
+            USER_CURSOR.change_auth(0, "root")
+            NOTIFICATION_CURSOR.create_user_table(0)
+            prt("root 账户已创建。", "green")
+        except Exception as e:
+            prt("root 账户创建失败: {}".format(e), "red")
+
     FILE_CURSOR.reconcile_references(
         MESSAGES_CURSOR.get_file_reference_rows() +
         FORUM_CURSOR.get_file_reference_rows()
